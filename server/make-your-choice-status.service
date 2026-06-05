@@ -1,0 +1,14 @@
+[Unit]
+Description=DbD Server Status (Make Your Choice)
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/make-your-choice/server
+ExecStart=/opt/make-your-choice/server/venv/bin/python -m gunicorn -w 1 -b 127.0.0.1:5000 app:app
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

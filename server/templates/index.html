@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DbD Server Status — Make Your Choice</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
+    <style>
+        :root {
+            --bg: #1a1a2e;
+            --card: #16213e;
+            --text: #e0e0e0;
+            --green: #4caf50;
+            --orange: #ff9800;
+            --red: #f44336;
+            --gray: #666;
+            --accent: #6e5494;
+            --border: #2a2a4a;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+        header { background: var(--card); padding: 16px 24px; border-bottom: 2px solid var(--accent); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
+        header h1 { font-size: 1.2rem; color: #fff; }
+        header .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+        header .badge { background: var(--accent); padding: 4px 12px; border-radius: 4px; font-size: 0.75rem; }
+        button, .range-btn { background: var(--border); color: var(--text); border: 1px solid #444; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 0.8rem; transition: background 0.2s; }
+        button:hover, .range-btn:hover { background: #3a3a5a; }
+        button.active, .range-btn.active { background: var(--accent); border-color: var(--accent); }
+        .container { max-width: 1100px; margin: 0 auto; padding: 16px; }
+        .legend { display: flex; gap: 18px; flex-wrap: wrap; padding: 10px 0; font-size: 0.78rem; color: var(--gray); }
+        .legend span { display: flex; align-items: center; gap: 6px; }
+        .legend .dot { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+        .legend .dot.g { background: var(--green); }
+        .legend .dot.o { background: var(--orange); }
+        .legend .dot.r { background: var(--red); }
+        .legend .dot.x { background: var(--gray); }
+        .group-title { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px; color: var(--gray); margin-top: 14px; margin-bottom: 4px; padding: 0 4px; }
+        .server-row { display: grid; grid-template-columns: 1fr 100px 120px 70px; gap: 12px; align-items: center; background: var(--card); padding: 10px 14px; border-radius: 8px; border-left: 4px solid transparent; }
+        .server-row.unstable { border-left-color: var(--orange); }
+        .server-row.stable { border-left-color: var(--green); }
+        .server-name { font-weight: 600; }
+        .server-name .warn { color: var(--orange); font-size: 0.75em; margin-left: 4px; }
+        .latency { text-align: center; font-family: 'Courier New', monospace; font-size: 0.95rem; }
+        .latency.good { color: var(--green); }
+        .latency.ok { color: var(--orange); }
+        .latency.bad { color: #dc143c; }
+        .latency.dead { color: var(--gray); }
+        .fleet { text-align: center; font-weight: 600; font-size: 0.9rem; }
+        .fleet.active { color: var(--green); }
+        .fleet.inactive { color: var(--orange); }
+        .fleet.unknown { color: var(--gray); }
+        .fleet.na { color: var(--gray); }
+        .updated { text-align: right; font-size: 0.7rem; color: var(--gray); }
+        .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--gray); border-top-color: var(--accent); border-radius: 50%; animation: spin 1s linear infinite; vertical-align: middle; margin-right: 6px; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .chart-wrapper { background: var(--card); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+        .chart-wrapper h3 { font-size: 1rem; margin-bottom: 8px; color: #ccc; }
+        .chart-wrapper h3 .warn { color: var(--orange); font-size: 0.8em; margin-left: 6px; }
+        .chart-inner { position: relative; height: 160px; }
+        .hidden { display: none !important; }
+        .footer { text-align: center; padding: 16px; font-size: 0.7rem; color: var(--gray); }
+        .footer a { color: var(--accent); text-decoration: none; }
+    </style>
+</head>
+<body>
+
+<header>
+    <div>
+        <h1>Dead by Daylight — Server Status</h1>
+    </div>
+    <div class="controls">
+        <span id="lastUpdate" class="badge">checking…</span>
+        <button id="btnStatus" class="active" onclick="switchView('status')">Status</button>
+        <button id="btnGraphs" onclick="switchView('graphs')">Graphs</button>
+    </div>
+</header>
+
+<div class="container">
+    <div class="legend">
+        <span><span class="dot g"></span> Fleet Active</span>
+        <span><span class="dot o"></span> Fleet Ramped Down</span>
+        <span><span class="dot x"></span> Not Checked (stable)</span>
+        <span><span class="dot r"></span> Offline / No Ping</span>
+    </div>
+
+    <div id="viewStatus">
+        <div id="grid" class="grid">
+            <div style="text-align:center;padding:40px;"><span class="spinner"></span> Loading…</div>
+        </div>
+    </div>
+
+    <div id="viewGraphs" class="hidden">
+        <div class="chart-wrapper" id="chartEuropeWrap">
+            <h3>Europe — Unstable Servers</h3>
+            <div class="chart-inner"><canvas id="canvasEurope"></canvas></div>
+        </div>
+        <div class="chart-wrapper" id="chartOhioWrap">
+            <h3>US East (Ohio) ⚠ Unstable</h3>
+            <div class="chart-inner"><canvas id="canvasOhio"></canvas></div>
+        </div>
+        <div class="chart-wrapper" id="chartCanadaWrap">
+            <h3>Canada (Central) ⚠ Unstable</h3>
+            <div class="chart-inner"><canvas id="canvasCanada"></canvas></div>
+        </div>
+    </div>
+</div>
+
+<div class="footer">
+    Powered by <a href="https://github.com/crweul/make-your-choice">Make Your Choice</a> &mdash; Checks every 30s
+</div>
+
+<script>
+const REGIONS = {{ regions | tojson }};
+const GROUP_ORDER = ['Europe', 'Americas', 'Asia', 'Oceania', 'China'];
+
+let currentView = 'status';
+let chartInstances = {};
+
+function switchView(view) {
+    currentView = view;
+    document.getElementById('viewStatus').classList.toggle('hidden', view !== 'status');
+    document.getElementById('viewGraphs').classList.toggle('hidden', view !== 'graphs');
+    document.getElementById('btnStatus').classList.toggle('active', view === 'status');
+    document.getElementById('btnGraphs').classList.toggle('active', view === 'graphs');
+    if (view === 'graphs') loadGraphs();
+}
+
+function renderStatus() {
+    fetch('/api/status')
+        .then(r => r.json())
+        .then(data => {
+            const grid = document.getElementById('grid');
+            const groups = {};
+            for (const [name, info] of Object.entries(REGIONS)) {
+                if (!groups[info.group]) groups[info.group] = [];
+                groups[info.group].push({ name, ...info, status: data[name] });
+            }
+
+            let now = null;
+            for (const s of Object.values(data)) {
+                if (s.last_check_iso) { now = s.last_check_iso; break; }
+            }
+            if (now) {
+                document.getElementById('lastUpdate').textContent = 'Last check: ' + new Date(now).toLocaleTimeString();
+            }
+
+            let html = '';
+            for (const g of GROUP_ORDER) {
+                const servers = groups[g];
+                if (!servers || !servers.length) continue;
+                html += '<div class="group-title">' + g + '</div>';
+                for (const s of servers) {
+                    const stable = s.stable;
+                    const icmp = s.status ? s.status.icmp_ms : null;
+                    const fleet = s.status ? s.status.fleet_active : null;
+
+                    let icmpClass = 'dead', icmpText = '\u2014';
+                    if (icmp !== null && icmp !== undefined) {
+                        icmpText = Math.round(icmp) + ' ms';
+                        if (icmp < 80) icmpClass = 'good';
+                        else if (icmp < 130) icmpClass = 'ok';
+                        else if (icmp < 250) icmpClass = 'bad';
+                    }
+
+                    let fleetClass = 'na', fleetText = 'N/A';
+                    if (stable) {
+                        if (icmp !== null) {
+                            fleetClass = 'active';
+                            fleetText = 'Online';
+                        } else {
+                            fleetClass = 'inactive';
+                            fleetText = 'Offline';
+                        }
+                    } else {
+                        if (fleet === true) { fleetClass = 'active'; fleetText = '\u2713 Active'; }
+                        else if (fleet === false) { fleetClass = 'inactive'; fleetText = '\u26A0 Ramped Down?'; }
+                        else { fleetClass = 'unknown'; fleetText = '?'; }
+                    }
+
+                    const rowClass = stable ? 'stable' : 'unstable';
+                    const warn = !stable ? '<span class="warn">\u26A0\uFE0E</span>' : '';
+
+                    html += '<div class="server-row ' + rowClass + '">' +
+                        '<div class="server-name">' + s.name + warn + '</div>' +
+                        '<div class="latency ' + icmpClass + '">' + icmpText + '</div>' +
+                        '<div class="fleet ' + fleetClass + '">' + fleetText + '</div>' +
+                        '<div class="updated">' + (now ? new Date(now).toLocaleTimeString() : '\u2014') + '</div>' +
+                    '</div>';
+                }
+            }
+            grid.innerHTML = html;
+        })
+        .catch(() => {
+            document.getElementById('grid').innerHTML = '<div style="text-align:center;padding:40px;color:var(--red)">Failed to load. Retrying…</div>';
+        });
+}
+
+function destroyCharts() {
+    for (const key of Object.keys(chartInstances)) {
+        if (chartInstances[key]) { chartInstances[key].destroy(); delete chartInstances[key]; }
+    }
+}
+
+function loadGraphs() {
+    destroyCharts();
+    fetch('/api/history?hours=168')
+        .then(r => r.json())
+        .then(data => {
+            // Build datasets: one chart per unstable server
+            const charts = [
+                { id: 'canvasEurope', names: ['Europe (London)'], title: 'Europe \u2014 London', color: '#4caf50' },
+                { id: 'canvasOhio', names: ['US East (Ohio)'], title: 'US East (Ohio)', color: '#2196f3' },
+                { id: 'canvasCanada', names: ['Canada (Central)'], title: 'Canada (Central)', color: '#ff9800' },
+            ];
+
+            for (const chart of charts) {
+                const canvas = document.getElementById(chart.id);
+                if (!canvas) continue;
+                const parent = canvas.closest('.chart-wrapper');
+                if (!parent) continue;
+
+                const datasets = [];
+                for (const name of chart.names) {
+                    const points = data[name] || [];
+                    datasets.push({
+                        label: name,
+                        data: points.map(p => ({ x: p.ts * 1000, y: p.fleet === true ? 1 : p.fleet === false ? 0 : -0.1 })),
+                        borderColor: chart.color,
+                        backgroundColor: chart.color + '44',
+                        borderWidth: 2,
+                        pointRadius: 0,
+                        stepped: 'before',
+                        fill: true,
+                        tension: 0,
+                    });
+                }
+
+                const ctx = canvas.getContext('2d');
+                chartInstances[chart.id] = new Chart(ctx, {
+                    type: 'line',
+                    data: { datasets: datasets.slice(0, 1) }, // only main dataset
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        animation: false,
+                        interaction: { mode: 'nearest', intersect: false },
+                        plugins: {
+                            legend: { display: false },
+                            tooltip: {
+                                callbacks: {
+                                    label: function(ctx) {
+                                        var val = ctx.parsed.y;
+                                        if (val >= 0.9) return 'Fleet: Active';
+                                        if (val >= 0) return 'Fleet: Ramped Down';
+                                        return 'Unknown';
+                                    }
+                                }
+                            },
+                            zoom: {
+                                pan: { enabled: true, mode: 'x' },
+                                zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' },
+                            },
+                        },
+                        scales: {
+                            x: {
+                                type: 'time',
+                                time: { unit: 'minute', displayFormats: { minute: 'HH:mm' } },
+                                grid: { color: '#2a2a4a' },
+                                ticks: { color: '#888', font: { size: 9 } },
+                            },
+                            y: {
+                                min: -0.2,
+                                max: 1.2,
+                                ticks: {
+                                    color: '#888',
+                                    font: { size: 9 },
+                                    stepSize: 1,
+                                    callback: function(v) { return v === 1 ? 'Active' : v === 0 ? 'Down' : ''; },
+                                },
+                                grid: { color: '#2a2a4a' },
+                            },
+                        },
+                    },
+                });
+            }
+        })
+        .catch(() => {
+            console.error('Failed to load history');
+        });
+}
+
+// Auto-refresh
+renderStatus();
+setInterval(() => {
+    if (currentView === 'status') renderStatus();
+    else loadGraphs();
+}, 15000);
+</script>
+
+</body>
+</html>
