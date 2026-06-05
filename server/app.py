@@ -6,12 +6,22 @@ import traceback
 from collections import defaultdict
 from datetime import datetime, timezone
 
+import requests
 from flask import Flask, render_template, jsonify, request
 
 from checker import REGIONS, UNSTABLE_SERVERS, check_all_regions
 from storage import load_series, save_series
 
 app = Flask(__name__)
+
+# Detect hosting location once at startup
+_host_location = "Unknown"
+try:
+    r = requests.get("http://ip-api.com/json/?fields=regionName", timeout=5)
+    if r.ok:
+        _host_location = r.json().get("regionName", "Unknown")
+except Exception:
+    pass
 
 # Only track unstable servers for history
 _series = defaultdict(list)
@@ -74,7 +84,7 @@ def index():
         name: {"service_host": info.service_host, "ping_host": info.ping_host, "stable": info.stable, "group": info.group}
         for name, info in REGIONS.items()
     }
-    return render_template("index.html", regions=regions_dict)
+    return render_template("index.html", regions=regions_dict, host_location=_host_location)
 
 
 @app.route("/api/status")
