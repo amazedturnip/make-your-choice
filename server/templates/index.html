@@ -1,379 +1,324 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DbD Server Status — Make Your Choice</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
-    <style>
-        :root {
-            --bg: #0d1117; --card: #161b22; --border: #30363d;
-            --text: #c9d1d9; --muted: #8b949e; --accent: #6e5494;
-            --green: #3fb950; --orange: #d2991d; --red: #f85149; --blue: #58a6ff;
-        }
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
-        header { background: var(--card); border-bottom: 1px solid var(--border); padding: 14px 24px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
-        header h1 { font-size: 1.15rem; color: #fff; }
-        header .badge { background: var(--accent); padding: 3px 10px; border-radius: 12px; font-size: 0.72rem; }
-        nav { display: flex; gap: 6px; }
-        nav button { background: var(--card); color: var(--text); border: 1px solid var(--border); padding: 7px 16px; border-radius: 6px; cursor: pointer; font-size: 0.82rem; transition: all 0.15s; }
-        nav button:hover { background: #1f2937; }
-        nav button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
-        nav button.watch { font-size: 0.75rem; padding: 4px 10px; }
-        .container { max-width: 1100px; margin: 0 auto; padding: 20px 16px; }
-        .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; margin-bottom: 20px; }
-        .stat-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
-        .stat-card h3 { font-size: 0.8rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
-        .stat-card .value { font-size: 1.8rem; font-weight: 700; }
-        .stat-card .value.green { color: var(--green); }
-        .stat-card .value.orange { color: var(--orange); }
-        .stat-card .value.red { color: var(--red); }
-        .stat-card .sub { font-size: 0.75rem; color: var(--muted); margin-top: 2px; }
-        .stat-card .schedule { font-size: 0.75rem; color: var(--muted); white-space: pre-line; line-height: 1.5; margin-top: 6px; }
-        .legend { display: flex; gap: 16px; flex-wrap: wrap; padding: 8px 0; font-size: 0.75rem; color: var(--muted); }
-        .legend .dot { width: 10px; height: 10px; border-radius: 2px; display: inline-block; margin-right: 5px; }
-        .dot.g { background: var(--green); } .dot.o { background: var(--orange); } .dot.r { background: var(--red); }
-        .section-title { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin: 20px 0 6px; padding: 0 4px; }
-        .server-row { display: grid; grid-template-columns: 1fr 80px 110px 60px; gap: 10px; align-items: center; background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px; margin-bottom: 4px; }
-        .server-row.unstable { border-left: 3px solid var(--orange); }
-        .server-row.stable { border-left: 3px solid var(--green); }
-        .server-name { font-weight: 600; font-size: 0.9rem; }
-        .server-name .tag { font-size: 0.65rem; background: var(--orange); color: #000; padding: 1px 5px; border-radius: 3px; margin-left: 6px; }
-        .latency { text-align: center; font-family: 'SF Mono',monospace; font-size: 0.88rem; }
-        .latency.good { color: var(--green); } .latency.ok { color: var(--orange); } .latency.bad { color: var(--red); } .latency.dead { color: var(--muted); }
-        .fleet { text-align: center; font-weight: 600; font-size: 0.82rem; }
-        .fleet.online { color: var(--green); } .fleet.offline { color: var(--red); } .fleet.active { color: var(--green); } .fleet.inactive { color: var(--orange); }
-        .fleet.unknown { color: var(--muted); }
-        .watch-toggle { text-align: center; cursor: pointer; font-size: 1rem; user-select: none; opacity: 0.5; }
-        .watch-toggle.watching { opacity: 1; }
-        .chart-wrapper { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
-        .chart-wrapper h3 { font-size: 0.9rem; margin-bottom: 8px; color: #ccc; }
-        .chart-inner { position: relative; height: 200px; }
-        .heatmap-grid { display: grid; grid-template-columns: 50px repeat(7, 1fr); gap: 2px; font-size: 0.7rem; }
-        .heatmap-grid .hdr { color: var(--muted); text-align: center; padding: 4px; }
-        .heatmap-grid .cell { text-align: center; padding: 6px 2px; border-radius: 3px; font-weight: 600; cursor: default; }
-        .cell.high { background: #1a7f37; color: #fff; } .cell.med { background: #9a6700; color: #fff; }
-        .cell.low { background: #5c1515; color: var(--muted); } .cell.none { background: var(--card); color: var(--muted); }
-        .range-btns { display: flex; gap: 4px; margin-top: 8px; }
-        .range-btns button { background: var(--card); color: var(--muted); border: 1px solid var(--border); padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 0.7rem; }
-        .range-btns button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
-        .hidden { display: none !important; }
-        .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--muted); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; margin-right: 6px; }
-        @keyframes spin { to { transform: rotate(360deg); } }
-        .footer { text-align: center; padding: 20px; font-size: 0.7rem; color: var(--muted); border-top: 1px solid var(--border); margin-top: 30px; }
-        .footer a { color: var(--accent); text-decoration: none; }
-        .notify-banner { background: var(--accent); color: #fff; text-align: center; padding: 8px; font-size: 0.78rem; cursor: pointer; display: none; }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>DbD Server Status — Make Your Choice</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
+<style>
+:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#c9d1d9;--muted:#8b949e;--accent:#6e5494;--green:#3fb950;--orange:#d2991d;--red:#f85149;--blue:#58a6ff}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+header{background:var(--card);border-bottom:1px solid var(--border);padding:14px 24px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px}
+header h1{font-size:1.15rem;color:#fff}
+header .badge{background:var(--accent);padding:3px 10px;border-radius:12px;font-size:.72rem}
+nav{display:flex;gap:6px}
+nav button{background:var(--card);color:var(--text);border:1px solid var(--border);padding:7px 16px;border-radius:6px;cursor:pointer;font-size:.82rem}
+nav button:hover{background:#1f2937}
+nav button.active{background:var(--accent);border-color:var(--accent);color:#fff}
+.container{max-width:1100px;margin:0 auto;padding:20px 16px}
+.legend{display:flex;gap:16px;flex-wrap:wrap;padding:8px 0;font-size:.75rem;color:var(--muted)}
+.legend span{display:flex;align-items:center;gap:5px}
+.dot{width:10px;height:10px;border-radius:2px;display:inline-block}.dot.g{background:var(--green)}.dot.o{background:var(--orange)}.dot.r{background:var(--red)}
+.section-title{font-size:.78rem;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin:20px 0 6px;padding:0 4px}
+.server-row{display:grid;grid-template-columns:1fr 80px 110px 60px;gap:10px;align-items:center;background:var(--card);border:1px solid var(--border);border-radius:6px;padding:10px 14px;margin-bottom:4px}
+.server-row.unstable{border-left:3px solid var(--orange)}.server-row.stable{border-left:3px solid var(--green)}
+.server-name{font-weight:600;font-size:.9rem}
+.server-name .tag{font-size:.65rem;background:var(--orange);color:#000;padding:1px 5px;border-radius:3px;margin-left:6px}
+.latency{text-align:center;font-family:monospace;font-size:.88rem}.latency.good{color:var(--green)}.latency.ok{color:var(--orange)}.latency.bad{color:var(--red)}.latency.dead{color:var(--muted)}
+.fleet{text-align:center;font-weight:600;font-size:.82rem}.fleet.online{color:var(--green)}.fleet.offline{color:var(--red)}.fleet.active{color:var(--green)}.fleet.inactive{color:var(--orange)}.fleet.unknown{color:var(--muted)}
+.watch-toggle{text-align:center;cursor:pointer;font-size:1rem;user-select:none;opacity:.5}.watch-toggle.watching{opacity:1}
+.chart-wrapper{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px}
+.chart-wrapper h3{font-size:.9rem;margin-bottom:8px;color:#ccc}
+.chart-inner{position:relative;height:200px}
+.range-btns{display:flex;gap:4px;margin-bottom:12px}
+.range-btns button{background:var(--card);color:var(--muted);border:1px solid var(--border);padding:4px 10px;border-radius:4px;cursor:pointer;font-size:.7rem}
+.range-btns button.active{background:var(--accent);border-color:var(--accent);color:#fff}
+.stats-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;margin-bottom:20px}
+.stat-card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px}
+.stat-card h3{font-size:.8rem;color:var(--muted);text-transform:uppercase;margin-bottom:8px}
+.stat-card .value{font-size:1.8rem;font-weight:700}.stat-card .value.green{color:var(--green)}.stat-card .value.orange{color:var(--orange)}.stat-card .value.red{color:var(--red)}
+.stat-card .sub{font-size:.75rem;color:var(--muted);margin-top:2px}
+.stat-card .schedule{font-size:.75rem;color:var(--muted);white-space:pre-line;line-height:1.5;margin-top:6px}
+.heatmap-grid{display:grid;grid-template-columns:50px repeat(7,1fr);gap:2px;font-size:.7rem;overflow-x:auto}
+.heatmap-grid .hdr{color:var(--muted);text-align:center;padding:4px}
+.heatmap-grid .cell{text-align:center;padding:6px 2px;border-radius:3px;font-weight:600}
+.heatmap-row{display:contents}
+.cell.high{background:#1a7f37;color:#fff}.cell.med{background:#9a6700;color:#fff}.cell.low{background:#5c1515;color:var(--muted)}.cell.none{background:var(--card);color:var(--muted)}
+.hidden{display:none!important}
+.spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--muted);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;vertical-align:middle;margin-right:6px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.footer{text-align:center;padding:20px;font-size:.7rem;color:var(--muted);border-top:1px solid var(--border);margin-top:30px}
+.footer a{color:var(--accent);text-decoration:none}
+.notify-banner{background:var(--accent);color:#fff;text-align:center;padding:8px;font-size:.78rem;cursor:pointer;display:none}
+.err{color:var(--red);text-align:center;padding:20px}
+</style>
 </head>
 <body>
 
-<div class="notify-banner" id="notifyBanner" onclick="requestNotificationPermission()">
-    Click here to enable browser notifications for server status changes
-</div>
+<div class="notify-banner" id="notifyBanner" onclick="requestNotificationPermission()">Click here to enable browser notifications for server status changes</div>
 
 <header>
-    <div>
-        <h1>Dead by Daylight — Server Fleet Status</h1>
-    </div>
-    <div style="display:flex;align-items:center;gap:10px;">
-        <span id="lastUpdate" class="badge">checking…</span>
-        <nav>
-            <button id="navStatus" class="active" onclick="switchTab('status')">Live</button>
-            <button id="navGraphs" onclick="switchTab('graphs')">Charts</button>
-            <button id="navStats" onclick="switchTab('stats')">Insights</button>
-        </nav>
-    </div>
+<div><h1>Dead by Daylight — Server Fleet Status</h1></div>
+<div style="display:flex;align-items:center;gap:10px">
+<span id="lastUpdate" class="badge">loading...</span>
+<nav>
+<button id="navStatus" class="active" onclick="switchTab('status')">Live</button>
+<button id="navGraphs" onclick="switchTab('graphs')">Charts</button>
+<button id="navStats" onclick="switchTab('stats')">Insights</button>
+</nav>
+</div>
 </header>
 
 <div class="container">
 
-    <!-- LIVE STATUS VIEW -->
-    <div id="tabStatus">
-        <div class="legend">
-            <span><span class="dot g"></span> Online</span>
-            <span><span class="dot o"></span> Ramped Down</span>
-            <span><span class="dot r"></span> Offline</span>
-            <span style="margin-left:auto;">🔔 = watching</span>
-        </div>
-        <div id="grid"></div>
-    </div>
+<div id="tabStatus">
+<div class="legend">
+<span><span class="dot g"></span> Online</span>
+<span><span class="dot o"></span> Ramped Down</span>
+<span><span class="dot r"></span> Offline</span>
+<span style="margin-left:auto">&#x1F514; = watching</span>
+</div>
+<div id="grid"><div style="text-align:center;padding:40px"><span class="spinner"></span> Loading...</div></div>
+</div>
 
-    <!-- GRAPHS VIEW -->
-    <div id="tabGraphs" class="hidden">
-        <div class="range-btns" style="margin-bottom:16px;">
-            <button data-hours="1">1h</button>
-            <button data-hours="6">6h</button>
-            <button data-hours="24">24h</button>
-            <button class="active" data-hours="168">7d</button>
-            <button data-hours="720">30d</button>
-            <button data-hours="2160">90d</button>
-        </div>
-        <div id="chartsContainer"></div>
-    </div>
+<div id="tabGraphs" class="hidden">
+<div class="range-btns">
+<button data-h="1">1h</button><button data-h="6">6h</button><button data-h="24">24h</button>
+<button data-h="168" class="active">7d</button><button data-h="720">30d</button><button data-h="2160">90d</button>
+</div>
+<div id="chartsContainer"></div>
+</div>
 
-    <!-- INSIGHTS VIEW -->
-    <div id="tabStats" class="hidden">
-        <div id="statsCards" class="stats-row"></div>
-        <div class="range-btns" style="margin-bottom:12px;">
-            <button data-hours="24">24h</button>
-            <button class="active" data-hours="168">7d</button>
-            <button data-hours="336">14d</button>
-        </div>
-        <div id="heatmapsContainer"></div>
-    </div>
+<div id="tabStats" class="hidden">
+<div class="range-btns" id="statsRangeBtns">
+<button data-h="24">24h</button><button data-h="168" class="active">7d</button><button data-h="336">14d</button>
+</div>
+<div id="statsCards" class="stats-row"></div>
+<div id="heatmapsContainer"></div>
+</div>
 
 </div>
 
-<div class="footer">
-    Powered by <a href="https://github.com/crweul/make-your-choice">Make Your Choice</a> &mdash; Every 30s &mdash; {{ host_location }}
-</div>
+<div class="footer">Powered by <a href="https://github.com/crweul/make-your-choice">Make Your Choice</a> — Every 30s — {{ host_location }}</div>
 
 <script>
-const REGIONS = {{ regions | tojson }};
-const UNSTABLE = Object.entries(REGIONS).filter(([,v]) => !v.stable).map(([k]) => k);
-const GROUPS = ['Europe','Americas','Asia','Oceania','China'];
+// ---- Data init ----
+var REGIONS = {{ regions|tojson }};
+var GROUPS = ['Europe','Americas','Asia','Oceania','China'];
+var UNSTABLE = [];
+for (var k in REGIONS) { if (REGIONS[k] && !REGIONS[k].stable) UNSTABLE.push(k); }
 
-let currentTab = 'status';
-let currentHours = 168;
-let statsHours = 168;
-let chartInstances = {};
-let watching = JSON.parse(localStorage.getItem('dbd_watched') || '[]');
-let lastFleet = {};
-let notifyGranted = false;
-let currentStatusData = {};
+var curTab = 'status';
+var gHours = 168;
+var sHours = 168;
+var charts = {};
+var watching = [];
+try { watching = JSON.parse(localStorage.getItem('dbd_watched')||'[]'); } catch(e){}
+var lastFleet = {};
+var notifyOk = false;
 
-function saveWatch() { localStorage.setItem('dbd_watched', JSON.stringify(watching)); }
+function saveW() { localStorage.setItem('dbd_watched', JSON.stringify(watching)); }
+function notify(msg) { if (notifyOk && document.hidden) { try { new Notification('DbD',{body:msg}); } catch(e){} } }
 
-function notify(msg) {
-    if (notifyGranted && document.hidden) {
-        new Notification('DbD Server Status', { body: msg, icon: 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🔔</text></svg>' });
-    }
+if (typeof Notification !== 'undefined') {
+  if (Notification.permission === 'granted') notifyOk = true;
+  else if (Notification.permission === 'default') document.getElementById('notifyBanner').style.display = 'block';
 }
 
 function requestNotificationPermission() {
-    if (!('Notification' in window)) return;
-    Notification.requestPermission().then(p => {
-        if (p === 'granted') { notifyGranted = true; document.getElementById('notifyBanner').style.display = 'none'; }
-    });
-}
-
-function toggleWatch(name) {
-    const idx = watching.indexOf(name);
-    if (idx >= 0) watching.splice(idx, 1);
-    else watching.push(name);
-    saveWatch();
-    renderStatus();
+  if (typeof Notification === 'undefined') return;
+  Notification.requestPermission().then(function(p) {
+    if (p==='granted') { notifyOk=true; document.getElementById('notifyBanner').style.display='none'; }
+  });
 }
 
 // ---- Tab switching ----
-function switchTab(tab) {
-    currentTab = tab;
-    ['Status','Graphs','Stats'].forEach(t => document.getElementById('tab'+t).classList.toggle('hidden', t !== tab));
-    ['navStatus','navGraphs','navStats'].forEach(id => document.getElementById(id).classList.toggle('active', id === 'nav'+tab));
-    if (tab === 'graphs') renderGraphs();
-    if (tab === 'stats') renderStats();
-    if (tab === 'status') renderStatus();
+function switchTab(t) {
+  curTab = t;
+  document.getElementById('tabStatus').classList.toggle('hidden', t!=='status');
+  document.getElementById('tabGraphs').classList.toggle('hidden', t!=='graphs');
+  document.getElementById('tabStats').classList.toggle('hidden', t!=='stats');
+  document.getElementById('navStatus').classList.toggle('active', t==='status');
+  document.getElementById('navGraphs').classList.toggle('active', t==='graphs');
+  document.getElementById('navStats').classList.toggle('active', t==='stats');
+  if (t==='graphs') loadGraphs();
+  if (t==='stats') loadStats();
 }
 
 // ---- Live Status ----
-function renderStatus() {
-    fetch('/api/status').then(r => r.json()).then(data => {
-        currentStatusData = data;
-        const grid = document.getElementById('grid');
-        const groups = {};
-        for (const [name, info] of Object.entries(REGIONS)) {
-            if (!groups[info.group]) groups[info.group] = [];
-            groups[info.group].push({ name, ...info, status: data[name] });
-        }
-        let now = null;
-        for (const s of Object.values(data)) { if (s.last_check_iso) { now = s.last_check_iso; break; } }
-        if (now) document.getElementById('lastUpdate').textContent = 'Last: ' + new Date(now).toLocaleTimeString();
+function loadStatus() {
+  fetch('/api/status').then(function(r){return r.json()}).then(function(d){
+    var groups = {};
+    for (var k in REGIONS) { var g=REGIONS[k].group; if(!groups[g])groups[g]=[]; groups[g].push(k); }
+    var now=null;
+    for (var n in d) { if(d[n].last_check_iso){now=d[n].last_check_iso;break;} }
+    if(now) document.getElementById('lastUpdate').textContent = 'Last: ' + new Date(now).toLocaleTimeString();
 
-        // Detect changes for notifications
-        for (const name of UNSTABLE) {
-            const prev = lastFleet[name];
-            const curr = data[name] ? data[name].fleet_active : null;
-            if (prev !== undefined && prev !== curr && watching.includes(name)) {
-                const label = curr ? 'is now ACTIVE' : 'may be RAMPED DOWN';
-                notify(name.replace(/^.*\(/, '(').replace(')','') + ' ' + label);
-            }
-            lastFleet[name] = curr;
-        }
+    for (var i=0; i<UNSTABLE.length; i++) {
+      var nm=UNSTABLE[i], prev=lastFleet[nm], curr=d[nm]?d[nm].fleet_active:null;
+      if (prev!==undefined && prev!==curr && watching.indexOf(nm)>=0)
+        notify(nm.replace(/^.*\(/,'(').replace(')','') + ' is now ' + (curr?'ACTIVE':'RAMPED DOWN'));
+      lastFleet[nm]=curr;
+    }
 
-        let html = '';
-        for (const g of GROUPS) {
-            const servers = groups[g];
-            if (!servers || !servers.length) continue;
-            html += '<div class="section-title">' + g + '</div>';
-            for (const s of servers) {
-                const stable = s.stable;
-                const icmp = s.status ? s.status.icmp_ms : null;
-                const fleet = s.status ? s.status.fleet_active : null;
+    var h='';
+    for (var gi=0; gi<GROUPS.length; gi++) {
+      var srvs=groups[GROUPS[gi]]; if(!srvs||!srvs.length) continue;
+      h+='<div class="section-title">'+GROUPS[gi]+'</div>';
+      for (var si=0; si<srvs.length; si++) {
+        var nm=srvs[si], info=REGIONS[nm], dd=d[nm]||{}, stable=info.stable;
+        var icmp=dd.icmp_ms, fleet=dd.fleet_active;
+        var ic=icmp!==null&&icmp!==undefined, fc=fleet!==null&&fleet!==undefined;
+        var icls='dead', itxt='\u2014';
+        if(ic){itxt=Math.round(icmp)+' ms'; if(icmp<80)icls='good'; else if(icmp<130)icls='ok'; else if(icmp<250)icls='bad';}
+        var fcls='unknown',ftxt='?';
+        if(stable){fcls=ic?'online':'offline'; ftxt=ic?'Online':'Offline';}
+        else{if(fc){fcls=fleet?'active':'inactive'; ftxt=fleet?'\u2713 Active':'\u26A0 Down';}}
+        var rc=stable?'stable':'unstable', tag=stable?'':'<span class="tag">unstable</span>';
+        var w=watching.indexOf(nm)>=0, wc=w?'watching':'', wi=w?'\uD83D\uDD14':'\uD83D\uDD15';
+        h+='<div class="server-row '+rc+'"><div class="server-name">'+nm+tag+'</div><div class="latency '+icls+'">'+itxt+'</div><div class="fleet '+fcls+'">'+ftxt+'</div><div class="watch-toggle '+wc+'" title="Watch" onclick="toggleWatch(\''+nm.replace(/'/g,"\\'")+'\')">'+wi+'</div></div>';
+      }
+    }
+    document.getElementById('grid').innerHTML = h;
+  }).catch(function(e){
+    document.getElementById('grid').innerHTML = '<div class="err">Failed to load: '+e.message+'</div>';
+  });
+}
 
-                let icmpClass = 'dead', icmpText = '\u2014';
-                if (icmp !== null) {
-                    icmpText = Math.round(icmp) + ' ms';
-                    if (icmp < 80) icmpClass = 'good';
-                    else if (icmp < 130) icmpClass = 'ok';
-                    else if (icmp < 250) icmpClass = 'bad';
-                }
-
-                let fleetClass = 'unknown', fleetText = '?';
-                if (stable) {
-                    fleetClass = icmp !== null ? 'online' : 'offline';
-                    fleetText = icmp !== null ? 'Online' : 'Offline';
-                } else {
-                    if (fleet === true) { fleetClass = 'active'; fleetText = '\u2713 Active'; }
-                    else if (fleet === false) { fleetClass = 'inactive'; fleetText = '\u26A0 Down'; }
-                }
-
-                const rowClass = stable ? 'stable' : 'unstable';
-                const tag = !stable ? '<span class="tag">unstable</span>' : '';
-                const w = watching.includes(s.name);
-                const wCls = w ? 'watching' : '';
-                const wIcon = w ? '\u{1F514}' : '\u{1F515}';
-
-                html += '<div class="server-row ' + rowClass + '">' +
-                    '<div class="server-name">' + s.name + tag + '</div>' +
-                    '<div class="latency ' + icmpClass + '">' + icmpText + '</div>' +
-                    '<div class="fleet ' + fleetClass + '">' + fleetText + '</div>' +
-                    '<div class="watch-toggle ' + wCls + '" title="Toggle notifications" onclick="toggleWatch(\'' + s.name.replace(/'/g, "\\'") + '\')">' + wIcon + '</div>' +
-                '</div>';
-            }
-        }
-        grid.innerHTML = html;
-    }).catch(() => { grid.innerHTML = '<div style="text-align:center;padding:40px;color:var(--red)">Failed to load.</div>'; });
+function toggleWatch(nm) {
+  var i=watching.indexOf(nm); if(i>=0)watching.splice(i,1); else watching.push(nm);
+  saveW(); loadStatus();
 }
 
 // ---- Graphs ----
-function renderGraphs() {
-    destroyCharts();
-    const charts = [
-        { id: 'canvasEurope', name: 'Europe (London)', color: '#3fb950', title: 'Europe (London)' },
-        { id: 'canvasOhio', name: 'US East (Ohio)', color: '#58a6ff', title: 'US East (Ohio)' },
-        { id: 'canvasCanada', name: 'Canada (Central)', color: '#d2991d', title: 'Canada (Central)' },
-    ];
-    const container = document.getElementById('chartsContainer');
-    container.innerHTML = charts.map(c =>
-        '<div class="chart-wrapper"><h3>'+c.title+' \u26A0 Unstable</h3><div class="chart-inner"><canvas id="'+c.id+'"></canvas></div></div>'
-    ).join('');
-
-    fetch('/api/history?hours=' + currentHours).then(r => r.json()).then(data => {
-        charts.forEach(c => {
-            const points = data[c.name] || [];
-            const ctx = document.getElementById(c.id).getContext('2d');
-            chartInstances[c.id] = new Chart(ctx, {
-                type: 'line',
-                data: { datasets: [{
-                    label: c.name,
-                    data: points.map(p => ({ x: p.ts*1000, y: p.fleet===true ? 1 : p.fleet===false ? 0 : -0.1 })),
-                    borderColor: c.color, backgroundColor: c.color+'33', borderWidth: 2, pointRadius: 0, stepped: 'before', fill: true, tension: 0,
-                }]},
-                options: {
-                    responsive: true, maintainAspectRatio: false, animation: false,
-                    interaction: { mode: 'nearest', intersect: false },
-                    plugins: {
-                        legend: { display: false },
-                        tooltip: { callbacks: { label: ctx => ctx.parsed.y >= 0.9 ? 'Active' : ctx.parsed.y >= 0 ? 'Ramped Down' : 'Unknown' } },
-                        zoom: { pan: { enabled: true, mode: 'x' }, zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' } },
-                    },
-                    scales: {
-                        x: { type: 'time', time: { unit: 'hour', displayFormats: { hour: 'MMM d HH:mm' } }, grid: { color: '#21262d' }, ticks: { color: '#8b949e', font: { size: 9 } } },
-                        y: { min: -0.2, max: 1.2, ticks: { color: '#8b949e', font:{size:9}, stepSize:1, callback: v => v===1?'Active':v===0?'Down':'' }, grid: { color: '#21262d' } },
-                    },
-                },
-            });
-        });
-    });
+function destroyCharts() {
+  for (var k in charts) { if(charts[k]) charts[k].destroy(); }
+  charts = {};
 }
 
-function destroyCharts() { Object.values(chartInstances).forEach(c => c && c.destroy()); chartInstances = {}; }
+function loadGraphs() {
+  destroyCharts();
+  var defs = [
+    {id:'gEurope', name:'Europe (London)', color:'#3fb950', label:'Europe (London)'},
+    {id:'gOhio', name:'US East (Ohio)', color:'#58a6ff', label:'US East (Ohio)'},
+    {id:'gCanada', name:'Canada (Central)', color:'#d2991d', label:'Canada (Central)'}
+  ];
+  var ctr = document.getElementById('chartsContainer');
+  ctr.innerHTML = '';
+  for (var i=0; i<defs.length; i++) {
+    var d=defs[i];
+    var wrap=document.createElement('div'); wrap.className='chart-wrapper';
+    wrap.innerHTML = '<h3>'+d.label+' \u26A0 Unstable</h3><div class="chart-inner"><canvas id="'+d.id+'"></canvas></div>';
+    ctr.appendChild(wrap);
+  }
 
-// ---- Stats / Insights ----
-function renderStats() {
-    fetch('/api/stats?hours=' + statsHours).then(r => r.json()).then(data => {
-        buildStatCards(data);
-        buildHeatmaps(data);
-    });
-}
-
-function buildStatCards(data) {
-    const container = document.getElementById('statsCards');
-    const colors = { 'Europe (London)': '#3fb950', 'US East (Ohio)': '#58a6ff', 'Canada (Central)': '#d2991d' };
-    let html = '';
-    for (const name of UNSTABLE) {
-        const s = data[name] || {};
-        const clr = s.uptime_pct >= 70 ? 'green' : s.uptime_pct >= 30 ? 'orange' : 'red';
-        html += '<div class="stat-card">' +
-            '<h3>' + name + '</h3>' +
-            '<div class="value ' + clr + '">' + s.uptime_pct + '%</div>' +
-            '<div class="sub">uptime over last ' + (statsHours >= 168 ? Math.round(statsHours/24)+'d' : statsHours+'h') + '</div>' +
-            '<div class="sub">Last active: ' + (s.last_active || 'N/A') + '</div>' +
-            (s.schedule && s.schedule !== 'Insufficient data' ? '<div class="schedule">' + s.schedule + '</div>' : '') +
-        '</div>';
-    }
-    container.innerHTML = html;
-}
-
-function buildHeatmaps(data) {
-    const container = document.getElementById('heatmapsContainer');
-    const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-    let html = '';
-    for (const name of UNSTABLE) {
-        const hm = (data[name] || {}).heatmap || {};
-        if (Object.keys(hm).length === 0) continue;
-        html += '<div class="chart-wrapper"><h3>' + name + ' — Fleet Active Heatmap</h3>';
-        html += '<div class="heatmap-grid">';
-        html += '<div class="hdr"></div>' + days.map(d => '<div class="hdr">'+d+'</div>').join('');
-        for (let hour = 0; hour < 24; hour++) {
-            html += '<div class="hdr">'+String(hour).padStart(2,'0')+':00</div>';
-            for (let dow = 0; dow < 7; dow++) {
-                const key = hour + '_' + dow;
-                const cell = hm[key];
-                const pct = cell ? cell.pct : -1;
-                let cls = 'none';
-                if (pct >= 70) cls = 'high';
-                else if (pct >= 30) cls = 'med';
-                else if (pct >= 0) cls = 'low';
-                html += '<div class="cell ' + cls + '" title="'+(cell?cell.pct+'% active ('+cell.samples+' checks)':'no data')+'">' + (pct >= 0 ? pct : '') + '</div>';
+  fetch('/api/history?hours='+gHours).then(function(r){return r.json()}).then(function(data){
+    for (var i=0; i<defs.length; i++) {
+      var d=defs[i], pts=data[d.name]||[];
+      var canvas=document.getElementById(d.id); if(!canvas) continue;
+      var ctx=canvas.getContext('2d');
+      try {
+        charts[d.id] = new Chart(ctx, {
+          type:'line',
+          data:{datasets:[{
+            data: pts.map(function(p){return {x:p.ts*1000, y:p.fleet===true?1:p.fleet===false?0:-0.1}}),
+            borderColor:d.color, backgroundColor:d.color+'33', borderWidth:2, pointRadius:0, stepped:true, fill:true, tension:0
+          }]},
+          options:{
+            responsive:true, maintainAspectRatio:false, animation:false,
+            interaction:{mode:'nearest',intersect:false},
+            plugins:{
+              legend:{display:false},
+              tooltip:{callbacks:{label:function(x){return x.parsed.y>=0.9?'Active':x.parsed.y>=0?'Ramped Down':'Unknown'}}},
+              zoom:{pan:{enabled:true,mode:'x'},zoom:{wheel:{enabled:true},pinch:{enabled:true},mode:'x'}}
+            },
+            scales:{
+              x:{type:'time',time:{unit:'hour',displayFormats:{hour:'MMM d HH:mm'}},grid:{color:'#21262d'},ticks:{color:'#8b949e',font:{size:9}}},
+              y:{min:-0.2,max:1.2,ticks:{color:'#8b949e',font:{size:9},stepSize:1,callback:function(v){return v===1?'Active':v===0?'Down':''}},grid:{color:'#21262d'}}
             }
-        }
-        html += '</div></div>';
-    }
-    container.innerHTML = html || '<div style="color:var(--muted);text-align:center;padding:40px;">Not enough data yet. Check back after a few hours.</div>';
-}
-
-// ---- Setup ----
-if ('Notification' in window && Notification.permission === 'granted') {
-    notifyGranted = true;
-} else if ('Notification' in window && Notification.permission === 'default') {
-    document.getElementById('notifyBanner').style.display = 'block';
-}
-
-document.querySelectorAll('.range-btns').forEach(bar => {
-    bar.querySelectorAll('button').forEach(btn => {
-        btn.addEventListener('click', () => {
-            bar.querySelectorAll('button').forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
-            const h = parseInt(btn.dataset.hours);
-            if (bar.closest('#tabGraphs')) { currentHours = h; renderGraphs(); }
-            if (bar.closest('#tabStats')) { statsHours = h; renderStats(); }
+          }
         });
-    });
+      } catch(e) { console.error('Chart error', d.name, e); }
+    }
+  }).catch(function(e){
+    ctr.innerHTML = '<div class="err">Failed to load charts: '+e.message+'</div>';
+  });
+}
+
+// ---- Stats ----
+function loadStats() {
+  fetch('/api/stats?hours='+sHours).then(function(r){return r.json()}).then(function(d){
+    buildStatCards(d);
+    buildHeatmaps(d);
+  }).catch(function(e){
+    document.getElementById('statsCards').innerHTML = '<div class="err">Failed: '+e.message+'</div>';
+  });
+}
+
+function buildStatCards(d) {
+  var ctr=document.getElementById('statsCards'), h='';
+  for (var i=0; i<UNSTABLE.length; i++) {
+    var nm=UNSTABLE[i], s=d[nm]||{}, up=s.uptime_pct||0;
+    var clr=up>=70?'green':up>=30?'orange':'red';
+    var lbl=sHours>=168?Math.round(sHours/24)+'d':sHours+'h';
+    h+='<div class="stat-card"><h3>'+nm+'</h3><div class="value '+clr+'">'+up+'%</div><div class="sub">uptime over '+lbl+'</div><div class="sub">Last active: '+(s.last_active||'N/A')+'</div>';
+    if(s.schedule&&s.schedule!=='Insufficient data') h+='<div class="schedule">'+s.schedule+'</div>';
+    h+='</div>';
+  }
+  ctr.innerHTML = h;
+}
+
+function buildHeatmaps(d) {
+  var ctr=document.getElementById('heatmapsContainer'), days=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'], h='';
+  for (var i=0; i<UNSTABLE.length; i++) {
+    var nm=UNSTABLE[i], hm=(d[nm]||{}).heatmap||{};
+    if (Object.keys(hm).length===0) continue;
+    h+='<div class="chart-wrapper"><h3>'+nm+' \u2014 Fleet Active Heatmap</h3><div class="heatmap-grid">';
+    h+='<div class="hdr"></div>';
+    for (var dow=0; dow<7; dow++) h+='<div class="hdr">'+days[dow]+'</div>';
+    for (var hr=0; hr<24; hr++) {
+      h+='<div class="hdr">'+String(hr).padStart(2,'0')+':00</div>';
+      for (var dow=0; dow<7; dow++) {
+        var key=hr+'_'+dow, cell=hm[key], pct=cell?cell.pct:-1, cls='none', title='no data';
+        if (pct>=70) cls='high';
+        else if (pct>=30) cls='med';
+        else if (pct>=0) cls='low';
+        if (cell) title=cell.pct+'% active ('+cell.samples+' checks)';
+        h+='<div class="cell '+cls+'" title="'+title+'">'+(pct>=0?pct:'')+'</div>';
+      }
+    }
+    h+='</div></div>';
+  }
+  ctr.innerHTML = h || '<div style="color:var(--muted);text-align:center;padding:40px">Not enough data yet. Check back after a few hours.</div>';
+}
+
+// ---- Range buttons ----
+document.querySelector('#tabGraphs .range-btns').addEventListener('click', function(e){
+  if (e.target.tagName==='BUTTON') {
+    var btns=this.querySelectorAll('button');
+    for (var i=0;i<btns.length;i++) btns[i].classList.remove('active');
+    e.target.classList.add('active');
+    gHours=parseInt(e.target.dataset.h);
+    loadGraphs();
+  }
+});
+document.getElementById('statsRangeBtns').addEventListener('click', function(e){
+  if (e.target.tagName==='BUTTON') {
+    var btns=this.querySelectorAll('button');
+    for (var i=0;i<btns.length;i++) btns[i].classList.remove('active');
+    e.target.classList.add('active');
+    sHours=parseInt(e.target.dataset.h);
+    loadStats();
+  }
 });
 
-renderStatus();
-setInterval(() => {
-    if (currentTab === 'status') renderStatus();
-}, 15000);
-setInterval(() => {
-    if (currentTab === 'graphs') renderGraphs();
-    if (currentTab === 'stats') renderStats();
-}, 60000);
+loadStatus();
+setInterval(function(){ if(curTab==='status') loadStatus(); }, 15000);
+setInterval(function(){ if(curTab==='graphs') loadGraphs(); if(curTab==='stats') loadStats(); }, 60000);
 </script>
 </body>
 </html>

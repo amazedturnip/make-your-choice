@@ -1,0 +1,100 @@
+# ============================================================
+# DbD Server Status Checker — Complete Build & Deploy Guide
+# ============================================================
+# Run these on your Linux box (Ubuntu/Debian assumed).
+# Works on any Debian-based distro with minor tweaks.
+
+# ---------- 1. Install system dependencies ----------
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip nginx curl
+
+# ---------- 2. Create the app directory ----------
+sudo mkdir -p /opt/server
+sudo chown $USER:$USER /opt/server
+cd /opt/server
+
+# ---------- 3. Copy source files ----------
+# (Run these FROM your local machine where the code is)
+# scp server/*.py server/requirements.txt root@YOUR_IP:/opt/server/
+# scp -r server/templates root@YOUR_IP:/opt/server/
+
+# ---------- 4. Create Python venv ----------
+python3 -m venv venv
+source venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# ---------- 5. Test it works ----------
+python app.py
+# Browse to http://YOUR_IP:5000  — confirm it loads
+# Ctrl+C to stop
+
+# ---------- 6. Create systemd service ----------
+sudo tee /etc/systemd/system/dbd-status.service << 'EOF'
+[Unit]
+Description=DbD Server Status Checker
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/server
+ExecStart=/opt/server/venv/bin/python /opt/server/app.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now dbd-status.service
+sudo systemctl status dbd-status.service
+
+# ---------- 7. Open firewall port ----------
+sudo ufw allow 5000/tcp
+
+# ---------- 8. UPnP port mapping (if your router supports it) ----------
+upnpc -e "DbD Status" -a YOUR_LAN_IP 5000 5000 TCP 0
+# Replace YOUR_LAN_IP with your actual LAN IP (e.g., 192.168.1.229)
+
+# If UPnP doesn't work, manually forward TCP 5000 in your router's admin panel.
+
+# ---------- 9. nginx reverse proxy ----------
+sudo tee /etc/nginx/sites-available/dbd.7urnip.org << 'EOF'
+server {
+    listen 8880;
+    server_name dbd.7urnip.org;
+
+    location / {
+        proxy_pass http://127.0.0.1:5000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+EOF
+
+sudo ln -sf /etc/nginx/sites-available/dbd.7urnip.org /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+
+# ---------- 10. Cloudflare DNS ----------
+# Add an A record:  dbd.7urnip.org  →  YOUR_PUBLIC_IP  (Proxied)
+# Add an Origin Rule:
+#   Hostname equals dbd.7urnip.org
+#   Destination Port → Rewrite to 8880
+#   SSL → set to "Flexible" (or use Configuration Rule if other subdomains use Full/Strict)
+
+# ---------- 11. Verify ----------
+curl -s http://127.0.0.1:5000/api/status | head -5
+curl -s http://127.0.0.1:5000/api/health | python3 -m json.tool
+# Browse to https://dbd.7urnip.org
+
+# ---------- Troubleshooting ----------
+# Check service logs:
+#   journalctl -u dbd-status.service -f
+# Check nginx logs:
+#   tail -f /var/log/nginx/error.log
+# Test manually:
+#   cd /opt/server && source venv/bin/activate && python app.py
+# Check port is open:
+#   ss -tlnp | grep 5000
