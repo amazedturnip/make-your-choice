@@ -8,13 +8,22 @@ from datetime import datetime, timezone
 
 import requests
 from flask import Flask, render_template, jsonify, request
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 from checker import REGIONS, UNSTABLE_SERVERS, check_all_regions
 from storage import load_series, save_series
+from stats import uptime_pct, last_active, heatmap, schedule_summary
 
 app = Flask(__name__)
 
-# Detect hosting location once at startup
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=["60 per minute"],
+    storage_uri="memory://",
+)
+
 _host_location = "Unknown"
 try:
     r = requests.get("http://ip-api.com/json/?fields=regionName", timeout=5)
@@ -23,7 +32,6 @@ try:
 except Exception:
     pass
 
-# Only track unstable servers for history
 _series = defaultdict(list)
 _loaded = load_series()
 for name in UNSTABLE_SERVERS:
@@ -31,23 +39,32 @@ for name in UNSTABLE_SERVERS:
         _series[name] = _loaded[name]
 
 _latest = {}
+_prev_fleet = {}  # track previous state for notification detection
 _checker_running = False
 _last_error = None
 _last_check_time = None
 
 
 def _run_checker_loop():
-    global _latest, _series, _checker_running, _last_error, _last_check_time
+    global _latest, _series, _prev_fleet, _checker_running, _last_error, _last_check_time
     loop_obj = asyncio.new_event_loop()
     asyncio.set_event_loop(loop_obj)
 
     async def loop():
-        global _latest, _series, _last_error, _last_check_time
+        global _latest, _series, _prev_fleet, _last_error, _last_check_time
         print("[checker] Started, waiting 5s before first check...", flush=True)
         await asyncio.sleep(5)
         while True:
             try:
                 results = await check_all_regions()
+                # Track state changes for notifications
+                for name in UNSTABLE_SERVERS:
+                    old = _prev_fleet.get(name)
+                    new = results.get(name)
+                    new_state = new.fleet_active if new else None
+                    if old is not None and old != new_state:
+                        print(f"[notify] {name}: {old} -> {new_state}", flush=True)
+                    _prev_fleet[name] = new_state
                 _latest = results
                 _last_check_time = datetime.now(timezone.utc).isoformat()
                 now_ts = datetime.now(timezone.utc).timestamp()
@@ -102,6 +119,37 @@ def api_status():
     return jsonify(result)
 
 
+@app.route("/api/notifications")
+def api_notifications():
+    """Return a list of servers whose fleet status changed since last check."""
+    changes = []
+    for name in UNSTABLE_SERVERS:
+        prev = _prev_fleet.get(name)
+        curr = None
+        s = _latest.get(name)
+        if s:
+            curr = s.fleet_active
+        if prev is not None and prev != curr:
+            changes.append({"name": name, "previous": prev, "current": curr})
+    return jsonify(changes)
+
+
+@app.route("/api/stats")
+def api_stats():
+    """Return uptime %, last active, heatmap, and schedule for each unstable server."""
+    hours = request.args.get("hours", 168, type=int)
+    result = {}
+    for name in UNSTABLE_SERVERS:
+        points = _series.get(name, [])
+        result[name] = {
+            "uptime_pct": uptime_pct(points, hours=hours),
+            "last_active": last_active(points),
+            "schedule": schedule_summary(points),
+            "heatmap": heatmap(points),
+        }
+    return jsonify(result)
+
+
 @app.route("/api/health")
 def api_health():
     sample = {}
@@ -122,7 +170,7 @@ def api_health():
 
 @app.route("/api/history")
 def api_history():
-    hours = request.args.get("hours", 168, type=int)  # default 7 days
+    hours = request.args.get("hours", 168, type=int)
     cutoff = datetime.now(timezone.utc).timestamp() - (hours * 3600)
     result = {}
     for name in UNSTABLE_SERVERS:
