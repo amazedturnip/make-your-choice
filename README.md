@@ -106,6 +106,8 @@ python app.py
 
 See [`server/DEPLOY.txt`](server/DEPLOY.txt) for full production deployment with nginx, systemd, and Cloudflare.
 
+**Live example:** [dbd.7urnip.org](https://dbd.7urnip.org)
+
 
 # Screenshots
 ## Windows
