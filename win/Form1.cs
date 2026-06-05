@@ -9,6 +9,7 @@ using System.Drawing.Drawing2D;
 using System.IO;
 using System.Net.NetworkInformation;
 using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using System.Windows.Forms;
 using System.Threading.Tasks;
@@ -157,8 +158,11 @@ namespace MakeYourChoice
         private enum BlockMode { Both, OnlyPing, OnlyService }
         private BlockMode _blockMode = BlockMode.Both;
         private bool _mergeUnstable = true;
+        private bool _showFleetStatus = true;
         private string _gamePath;
         private bool _darkMode = false;
+        // Fleet status: true = UDP ping responds (fleet likely active), false = no response (fleet possibly ramped down)
+        private readonly Dictionary<string, bool> _fleetActive = new();
         private Label _lblConnectedToValue;
         private Label _lblConnectionDot; 
         private TrafficSniffer _sniffer;
@@ -193,6 +197,7 @@ namespace MakeYourChoice
             public ApplyMode ApplyMode { get; set; }
             public BlockMode BlockMode { get; set; }
             public bool MergeUnstable { get; set; } = true;
+            public bool ShowFleetStatus { get; set; } = true;
             public string LastLaunchedVersion { get; set; }
             public string GamePath { get; set; }
             public string AutoUpdateCheckPausedUntil { get; set; }
@@ -216,6 +221,7 @@ namespace MakeYourChoice
                     _applyMode = settings.ApplyMode;
                     _blockMode = settings.BlockMode;
                     _mergeUnstable = settings.MergeUnstable;
+                    _showFleetStatus = settings.ShowFleetStatus;
                     _lastLaunchedVersion = settings.LastLaunchedVersion;
                     _gamePath = settings.GamePath;
                     _autoUpdateCheckPausedUntil = settings.AutoUpdateCheckPausedUntil;
@@ -243,6 +249,7 @@ namespace MakeYourChoice
                     ApplyMode = _applyMode,
                     BlockMode = _blockMode,
                     MergeUnstable = _mergeUnstable,
+                    ShowFleetStatus = _showFleetStatus,
                     LastLaunchedVersion = string.IsNullOrWhiteSpace(_lastLaunchedVersion) ? CurrentVersion : _lastLaunchedVersion,
                     GamePath = _gamePath,
                     AutoUpdateCheckPausedUntil = _autoUpdateCheckPausedUntil,
@@ -1361,6 +1368,52 @@ namespace MakeYourChoice
             }
         }
 
+        private async Task<bool> PingGameLiftFleetAsync(string pingHost, int timeoutMs = 1500)
+        {
+            try
+            {
+                using var udp = new UdpClient();
+                udp.Client.ReceiveTimeout = timeoutMs;
+                udp.Client.SendTimeout = timeoutMs;
+
+                var packet = new byte[12];
+                // GameLift ping protocol: "GLPL" magic (4 bytes) + timestamp (8 bytes, network byte order)
+                packet[0] = 0x47; // G
+                packet[1] = 0x4C; // L
+                packet[2] = 0x50; // P
+                packet[3] = 0x4C; // L
+                var timestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                packet[4] = (byte)(timestamp >> 56);
+                packet[5] = (byte)(timestamp >> 48);
+                packet[6] = (byte)(timestamp >> 40);
+                packet[7] = (byte)(timestamp >> 32);
+                packet[8] = (byte)(timestamp >> 24);
+                packet[9] = (byte)(timestamp >> 16);
+                packet[10] = (byte)(timestamp >> 8);
+                packet[11] = (byte)timestamp;
+
+                var addresses = await Dns.GetHostAddressesAsync(pingHost);
+                if (addresses.Length == 0) return false;
+
+                // GameLift ping uses port 443 (same as HTTPS API)
+                await udp.SendAsync(packet, packet.Length, new IPEndPoint(addresses[0], 443));
+
+                var remoteEp = new IPEndPoint(IPAddress.Any, 0);
+                var response = await Task.Run(() => udp.Receive(ref remoteEp));
+
+                // Valid echo response: 12 bytes starting with "GLPL"
+                return response.Length >= 12
+                    && response[0] == 0x47
+                    && response[1] == 0x4C
+                    && response[2] == 0x50
+                    && response[3] == 0x4C;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         private void StartPingTimer()
         {
             var pinger = new Ping();
@@ -1387,6 +1440,32 @@ namespace MakeYourChoice
                     results[regionKey] = ms;
                 }
 
+                // Fleet status checks: UDP ping to gamelift-ping endpoint for unstable servers
+                if (_showFleetStatus)
+                {
+                    var fleetTasks = new Dictionary<string, Task<bool>>();
+                    foreach (var kv in _regions)
+                    {
+                        if (!kv.Value.Stable)
+                        {
+                            fleetTasks[kv.Key] = PingGameLiftFleetAsync(kv.Value.Hosts[1]);
+                        }
+                    }
+                    try
+                    {
+                        await Task.WhenAll(fleetTasks.Values);
+                        lock (_fleetActive)
+                        {
+                            foreach (var kv in fleetTasks)
+                                _fleetActive[kv.Key] = kv.Value.Result;
+                        }
+                    }
+                    catch
+                    {
+                        // Ignore fleet check errors
+                    }
+                }
+
                 // Update UI in one batch to avoid flicker (only after handles exist)
                 if (!IsHandleCreated || IsDisposed || !_lv.IsHandleCreated || _lv.IsDisposed)
                     return;
@@ -1410,8 +1489,26 @@ namespace MakeYourChoice
                             }
                             else
                             {
-                                sub.Text = ms >= 0 ? $"{ms} ms" : "disconnected";
-                                sub.ForeColor = GetColorForLatency(ms);
+                                var baseText = ms >= 0 ? $"{ms} ms" : "disconnected";
+
+                                // Fleet status indicator: show for unstable servers when enabled
+                                if (_showFleetStatus && !_regions[regionKey].Stable)
+                                {
+                                    bool fleetActive;
+                                    lock (_fleetActive)
+                                        fleetActive = _fleetActive.TryGetValue(regionKey, out var active) && active;
+
+                                    if (ms >= 0)
+                                        sub.Text = fleetActive ? baseText + "  ✓" : baseText + "  ⚠";
+                                    else
+                                        sub.Text = baseText;
+                                    sub.ForeColor = fleetActive ? GetColorForLatency(ms) : Color.Orange;
+                                }
+                                else
+                                {
+                                    sub.Text = baseText;
+                                    sub.ForeColor = GetColorForLatency(ms);
+                                }
                             }
                             sub.Font      = new Font(sub.Font, FontStyle.Italic);
                         }
@@ -2282,7 +2379,7 @@ namespace MakeYourChoice
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 ColumnCount = 1,
-                RowCount = 4
+                RowCount = 5
             };
 
             var rbBoth = new RadioButton { Text = "Block both (default)", AutoSize = true, Margin = new Padding(3, 3, 3, 3) };
@@ -2300,10 +2397,22 @@ namespace MakeYourChoice
             var toolTipMerge = new ToolTip();
             toolTipMerge.SetToolTip(cbMergeUnstable, "Merge unstable servers with a stable alternative. (recommended)");
 
+            var cbShowFleetStatus = new CheckBox
+            {
+                Text = "Show fleet status for unstable servers",
+                AutoSize = true,
+                Checked = _showFleetStatus,
+                MaximumSize = new Size(320, 0),
+                Margin = new Padding(3, 3, 3, 3)
+            };
+            var toolTipFleet = new ToolTip();
+            toolTipFleet.SetToolTip(cbShowFleetStatus, "Uses UDP pings to the GameLift fleet endpoint to check if Ohio, Canada Central, and London servers are likely active or ramped down by DBD.");
+
             tlpBlock.Controls.Add(rbBoth, 0, 0);
             tlpBlock.Controls.Add(rbPing, 0, 1);
             tlpBlock.Controls.Add(rbService, 0, 2);
             tlpBlock.Controls.Add(cbMergeUnstable, 0, 3);
+            tlpBlock.Controls.Add(cbShowFleetStatus, 0, 4);
             blockPanel.Controls.Add(tlpBlock);
 
             // Initialize selections
@@ -2471,6 +2580,7 @@ namespace MakeYourChoice
                 cbApplyMode.SelectedIndex = 0;
                 rbBoth.Checked = true;
                 cbMergeUnstable.Checked = true;
+                cbShowFleetStatus.Checked = true;
                 tbGamePath.Text = string.Empty;
                 cbDarkMode.Checked = false;
             };
@@ -2516,6 +2626,7 @@ namespace MakeYourChoice
                     else                      _blockMode = BlockMode.OnlyService;
                 }
                 _mergeUnstable = cbMergeUnstable.Checked;
+                _showFleetStatus = cbShowFleetStatus.Checked;
                 _gamePath = gamePathText;
                 _darkMode = cbDarkMode.Checked;
                 SaveSettings();
@@ -2553,6 +2664,19 @@ namespace MakeYourChoice
                     item.Text = regionKey + " ⚠︎";
                     item.ForeColor = Color.Orange;
                     item.ToolTipText = "Unstable server: latency issues may occur.";
+                }
+
+                // Fleet status tooltip for unstable servers
+                if (_showFleetStatus && !_regions[regionKey].Stable)
+                {
+                    bool fleetActive;
+                    lock (_fleetActive)
+                        fleetActive = _fleetActive.TryGetValue(regionKey, out var active) && active;
+
+                    var fleetNote = fleetActive
+                        ? "\nFleet: likely active (UDP ping responded)"
+                        : "\nFleet: possibly ramped down (UDP ping failed)";
+                    item.ToolTipText = (string.IsNullOrEmpty(item.ToolTipText) ? "" : item.ToolTipText) + fleetNote;
                 }
             }
         }
