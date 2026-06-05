@@ -84,6 +84,29 @@ This option won't provide desktop entries to easily access the app. Use this onl
 This option is recommended if you have a SteamOS device.
 
 
+# Server Fleet Status Tracker (Web)
+A lightweight Python web dashboard that continuously monitors DBD server fleet availability. Detects when unstable servers (Ohio, Canada Central, London) are ramped down or shut off by the matchmaking backend.
+
+### Features
+- **Live status grid** — real-time ping and fleet status for all 15 regions
+- **Fleet detection** — UDP-pings the GameLift fleet endpoint to determine if unstable servers are actually accepting players (not just pingable)
+- **Uptime charts** — interactive timelines with zoom/pan for each unstable server
+- **Insights dashboard** — uptime percentages, auto-detected active schedules, and a 24h × 7d heatmap
+- **Browser notifications** — opt-in per-server alerts when an unstable server flips from active to ramped down (or vice versa)
+- **Data persistence** — stores history across reboots, auto-prunes at ~500MB
+
+### Quick Start
+```bash
+cd server
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+python app.py
+# Open http://localhost:5000
+```
+
+See [`server/DEPLOY.txt`](server/DEPLOY.txt) for full production deployment with nginx, systemd, and Cloudflare.
+
+
 # Screenshots
 ## Windows
 <img src="https://i.imgur.com/36jV4su.png" alt="Main" height="450"> <img src="https://i.imgur.com/45Gesfc.png" alt="Main" height="450">  
