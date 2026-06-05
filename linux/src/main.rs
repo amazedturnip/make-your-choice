@@ -84,6 +84,7 @@ struct AppState {
     aws_service: Arc<AwsIpService>,
     connected_to_label: Label,
     connection_dot: Label,
+    fleet_active: RefCell<HashMap<String, bool>>,
 }
 
 fn get_color_for_latency(ms: i64) -> &'static str {
@@ -106,6 +107,8 @@ fn refresh_warning_symbols(
     list_store: &ListStore,
     regions: &HashMap<String, RegionInfo>,
     merge_unstable: bool,
+    show_fleet_status: bool,
+    fleet_active_map: &HashMap<String, bool>,
 ) {
     if let Some(iter) = list_store.iter_first() {
         loop {
@@ -124,12 +127,18 @@ fn refresh_warning_symbols(
                         clean_name
                     };
 
-                    // Update tooltip based on merge_unstable setting
-                    let tooltip = if !region_info.stable && !merge_unstable {
-                        "Unstable: issues may occur.".to_string()
-                    } else {
-                        String::new()
-                    };
+                    // Build tooltip
+                    let mut tooltip = String::new();
+                    if !region_info.stable && !merge_unstable {
+                        tooltip = "Unstable: issues may occur.".to_string();
+                    }
+                    if show_fleet_status && !region_info.stable {
+                        let fleet_note = match fleet_active_map.get(&clean_name) {
+                            Some(true) => "\nFleet: likely active (UDP ping responded)",
+                            _ => "\nFleet: possibly ramped down (UDP ping failed)",
+                        };
+                        tooltip.push_str(fleet_note);
+                    }
 
                     list_store.set(&iter, &[(0, &display_name), (6, &tooltip)]);
                 }
@@ -726,7 +735,8 @@ fn build_ui(app: &Application) {
         sniffer,
         aws_service,
         connected_to_label: connected_value,
-        connection_dot: connection_dot, 
+        connection_dot: connection_dot,
+        fleet_active: RefCell::new(HashMap::new()),
     });
 
     // Create menu bar
@@ -1933,6 +1943,10 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
     let merge_check = CheckButton::with_label("Merge unstable servers (recommended)");
     merge_check.set_active(settings.merge_unstable);
 
+    // Show fleet status
+    let fleet_check = CheckButton::with_label("Show fleet status for unstable servers");
+    fleet_check.set_active(settings.show_fleet_status);
+
     settings_box.append(&mode_label);
     settings_box.append(&mode_combo);
     settings_box.append(&mode_notice);
@@ -1942,6 +1956,7 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
     settings_box.append(&rb_ping);
     settings_box.append(&rb_service);
     settings_box.append(&merge_check);
+    settings_box.append(&fleet_check);
     settings_box.append(&Separator::new(Orientation::Horizontal));
 
     // Game folder
@@ -2034,15 +2049,19 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
             };
 
             settings.merge_unstable = merge_check.is_active();
+            settings.show_fleet_status = fleet_check.is_active();
             settings.game_path = game_path_text;
 
             let _ = settings.save();
 
             // Refresh the warning symbols in the list view
+            let fleet_active = app_state_clone.fleet_active.borrow().clone();
             refresh_warning_symbols(
                 &app_state_clone.list_store,
                 &app_state_clone.regions,
                 settings.merge_unstable,
+                settings.show_fleet_status,
+                &fleet_active,
             );
 
             dialog.close();
@@ -2054,6 +2073,7 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
             settings.apply_mode = ApplyMode::Gatekeep;
             settings.block_mode = BlockMode::Both;
             settings.merge_unstable = true;
+            settings.show_fleet_status = true;
             settings.game_path.clear();
 
             let _ = settings.save();
@@ -2063,12 +2083,16 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
             mode_combo.set_active(Some(0));
             rb_both.set_active(true);
             merge_check.set_active(true);
+            fleet_check.set_active(true);
 
             // Refresh the warning symbols in the list view
+            let fleet_active = app_state_clone.fleet_active.borrow().clone();
             refresh_warning_symbols(
                 &app_state_clone.list_store,
                 &app_state_clone.regions,
                 settings.merge_unstable,
+                settings.show_fleet_status,
+                &fleet_active,
             );
 
             // Don't close dialog - let user see the changes
@@ -2146,6 +2170,9 @@ fn start_ping_timer(app_state: Rc<AppState>) {
         let blocked_hosts = app_state.hosts_manager.get_blocked_hostnames();
         let runtime = app_state.tokio_runtime.clone();
         let list_store = app_state.list_store.clone();
+        let show_fleet = app_state.settings.lock().map(|s| s.show_fleet_status).unwrap_or(true);
+        let fleet_active = app_state.fleet_active.clone();
+        let regions_for_fleet = regions.clone();
 
         // Spawn work on tokio runtime in background thread
         glib::spawn_future_local(async move {
@@ -2166,6 +2193,27 @@ fn start_ping_timer(app_state: Rc<AppState>) {
                 .await
                 .unwrap();
 
+            // Fleet status checks
+            if show_fleet {
+                let fleet_results = runtime
+                    .spawn(async move {
+                        let mut results = HashMap::new();
+                        for (region_name, region_info) in regions_for_fleet.iter() {
+                            if !region_info.stable {
+                                if let Some(ping_host) = region_info.hosts.get(1) {
+                                    let active = ping::ping_gamelift_fleet(ping_host).await;
+                                    results.insert(region_name.clone(), active);
+                                }
+                            }
+                        }
+                        results
+                    })
+                    .await
+                    .unwrap();
+
+                fleet_active.replace(fleet_results);
+            }
+
             // Update the UI on the main thread
             if let Some(iter) = list_store.iter_first() {
                 loop {
@@ -2176,16 +2224,44 @@ fn start_ping_timer(app_state: Rc<AppState>) {
                         let name = list_store.get::<String>(&iter, 0);
                         let clean_name = name.replace(" ⚠︎", "");
 
+                        let is_unstable = regions.get(&clean_name).map(|r| !r.stable).unwrap_or(false);
+
                         if is_region_blocked_by_hosts(&clean_name, &regions, &blocked_regions, &blocked_hosts) {
                             list_store.set(&iter, &[(1, &"disconnected".to_string()), (5, &"gray".to_string())]);
                         } else if let Some(&latency) = latency_results.get(&clean_name) {
-                            let latency_text = if latency >= 0 {
-                                format!("{} ms", latency)
+                            let (latency_text, color) = if show_fleet && is_unstable {
+                                let active = fleet_active.borrow().get(&clean_name).copied().unwrap_or(false);
+                                if latency >= 0 {
+                                    let text = if active {
+                                        format!("{} ms  ✓", latency)
+                                    } else {
+                                        format!("{} ms  ⚠", latency)
+                                    };
+                                    let color = if active { get_color_for_latency(latency) } else { "#ffa500" };
+                                    (text, color.to_string())
+                                } else {
+                                    ("disconnected".to_string(), "#778899".to_string())
+                                }
                             } else {
-                                "disconnected".to_string()
+                                let text = if latency >= 0 {
+                                    format!("{} ms", latency)
+                                } else {
+                                    "disconnected".to_string()
+                                };
+                                let color = get_color_for_latency(latency);
+                                (text, color.to_string())
                             };
-                            let color = get_color_for_latency(latency);
-                            list_store.set(&iter, &[(1, &latency_text), (5, &color.to_string())]);
+                            let tooltip = if show_fleet && is_unstable {
+                                let active = fleet_active.borrow().get(&clean_name).copied().unwrap_or(false);
+                                if active {
+                                    "Fleet: likely active (UDP ping responded)".to_string()
+                                } else {
+                                    "Fleet: possibly ramped down (UDP ping failed)".to_string()
+                                }
+                            } else {
+                                String::new()
+                            };
+                            list_store.set(&iter, &[(1, &latency_text), (5, &color), (6, &tooltip)]);
                         }
                     }
 
