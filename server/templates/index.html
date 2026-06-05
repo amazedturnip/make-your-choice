@@ -75,6 +75,14 @@
         <span id="lastUpdate" class="badge">checking…</span>
         <button id="btnStatus" class="active" onclick="switchView('status')">Status</button>
         <button id="btnGraphs" onclick="switchView('graphs')">Graphs</button>
+        <div id="rangeBtns" class="hidden">
+            <button class="range-btn" data-hours="1">1h</button>
+            <button class="range-btn" data-hours="6">6h</button>
+            <button class="range-btn" data-hours="24">24h</button>
+            <button class="range-btn active" data-hours="168">7d</button>
+            <button class="range-btn" data-hours="720">30d</button>
+            <button class="range-btn" data-hours="2160">90d</button>
+        </div>
     </div>
 </header>
 
@@ -94,7 +102,7 @@
 
     <div id="viewGraphs" class="hidden">
         <div class="chart-wrapper" id="chartEuropeWrap">
-            <h3>Europe — Unstable Servers</h3>
+            <h3>Europe (London) ⚠ Unstable</h3>
             <div class="chart-inner"><canvas id="canvasEurope"></canvas></div>
         </div>
         <div class="chart-wrapper" id="chartOhioWrap">
@@ -117,6 +125,7 @@ const REGIONS = {{ regions | tojson }};
 const GROUP_ORDER = ['Europe', 'Americas', 'Asia', 'Oceania', 'China'];
 
 let currentView = 'status';
+let currentHours = 168;
 let chartInstances = {};
 
 function switchView(view) {
@@ -125,6 +134,7 @@ function switchView(view) {
     document.getElementById('viewGraphs').classList.toggle('hidden', view !== 'graphs');
     document.getElementById('btnStatus').classList.toggle('active', view === 'status');
     document.getElementById('btnGraphs').classList.toggle('active', view === 'graphs');
+    document.getElementById('rangeBtns').classList.toggle('hidden', view !== 'graphs');
     if (view === 'graphs') loadGraphs();
 }
 
@@ -206,7 +216,7 @@ function destroyCharts() {
 
 function loadGraphs() {
     destroyCharts();
-    fetch('/api/history?hours=168')
+    fetch('/api/history?hours=' + currentHours)
         .then(r => r.json())
         .then(data => {
             // Build datasets: one chart per unstable server
@@ -291,6 +301,16 @@ function loadGraphs() {
             console.error('Failed to load history');
         });
 }
+
+// Range button handlers
+document.querySelectorAll('.range-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+        document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        currentHours = parseInt(btn.dataset.hours);
+        if (currentView === 'graphs') loadGraphs();
+    });
+});
 
 // Auto-refresh
 renderStatus();
