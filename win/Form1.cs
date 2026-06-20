@@ -167,6 +167,10 @@ namespace MakeYourChoice
         private bool _minimizeToTray = true;
         // Notify (tray balloon) when the preferred server transitions offline -> online.
         private bool _notifyServerOnline = false;
+        // Start automatically at Windows logon (via a scheduled task so the elevated app launches
+        // without a UAC prompt each login).
+        private bool _startWithWindows = false;
+        private const string AutoStartTaskName = "MakeYourChoice AutoStart";
         // Last session's ticked regions, restored on launch so the selection (and any matching
         // firewall rules) is repopulated. Updated whenever settings are saved.
         private List<string> _savedSelection = new();
@@ -211,6 +215,7 @@ namespace MakeYourChoice
             public bool UseHardRegionLock { get; set; }
             public bool MinimizeToTray { get; set; } = true;
             public bool NotifyServerOnline { get; set; }
+            public bool StartWithWindows { get; set; }
             public List<string> SelectedRegions { get; set; }
         }
 
@@ -238,6 +243,7 @@ namespace MakeYourChoice
                     _useHardLock = settings.UseHardRegionLock;
                     _minimizeToTray = settings.MinimizeToTray;
                     _notifyServerOnline = settings.NotifyServerOnline;
+                    _startWithWindows = settings.StartWithWindows;
                     _savedSelection = settings.SelectedRegions ?? new List<string>();
                 }
             }
@@ -270,6 +276,7 @@ namespace MakeYourChoice
                     UseHardRegionLock = _useHardLock,
                     MinimizeToTray = _minimizeToTray,
                     NotifyServerOnline = _notifyServerOnline,
+                    StartWithWindows = _startWithWindows,
                     SelectedRegions = GetCheckedRegionKeys(),
                 };
                 var serializer = new SerializerBuilder().Build();
@@ -280,6 +287,43 @@ namespace MakeYourChoice
             {
                 // ignore save errors
             }
+        }
+
+        // Create/remove a logon scheduled task that launches the app elevated at startup. A
+        // scheduled task with highest privileges avoids the per-login UAC prompt a Run-key entry
+        // would trigger for this admin-required app.
+        private static void SetAutoStart(bool enable)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo("schtasks")
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                };
+                if (enable)
+                {
+                    var exe = Environment.ProcessPath;
+                    if (string.IsNullOrEmpty(exe)) return;
+                    psi.ArgumentList.Add("/create");
+                    psi.ArgumentList.Add("/tn"); psi.ArgumentList.Add(AutoStartTaskName);
+                    psi.ArgumentList.Add("/tr"); psi.ArgumentList.Add("\"" + exe + "\"");
+                    psi.ArgumentList.Add("/sc"); psi.ArgumentList.Add("onlogon");
+                    psi.ArgumentList.Add("/rl"); psi.ArgumentList.Add("highest");
+                    psi.ArgumentList.Add("/f");
+                }
+                else
+                {
+                    psi.ArgumentList.Add("/delete");
+                    psi.ArgumentList.Add("/tn"); psi.ArgumentList.Add(AutoStartTaskName);
+                    psi.ArgumentList.Add("/f");
+                }
+                using var p = Process.Start(psi);
+                p?.WaitForExit();
+            }
+            catch { /* ignore */ }
         }
 
         // Region keys currently ticked in the main list (falls back to the saved set if the list
@@ -562,7 +606,23 @@ namespace MakeYourChoice
             _sniffer = new TrafficSniffer();
             _sniffer.TrafficDetected += OnTrafficDetected;
 
-            this.Icon = new Icon(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "icon.ico"));
+            // Load the window icon from the EXE's embedded icon (always present) rather than a loose
+            // icon.ico file, so the single-file build runs from any folder. (A bare copy of the exe
+            // has no icon.ico next to it, and the unguarded file load used to crash on startup.)
+            try
+            {
+                var embedded = Icon.ExtractAssociatedIcon(Environment.ProcessPath);
+                if (embedded != null) this.Icon = embedded;
+            }
+            catch
+            {
+                try
+                {
+                    var icoPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "icon.ico");
+                    if (File.Exists(icoPath)) this.Icon = new Icon(icoPath);
+                }
+                catch { /* keep default icon */ }
+            }
             this.Shown += async (_, __) =>
             {
                 StartSniffer();
@@ -2500,7 +2560,7 @@ namespace MakeYourChoice
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 ColumnCount = 1,
-                RowCount = 3
+                RowCount = 4
             };
             var cbDarkMode = new CheckBox
             {
@@ -2527,9 +2587,19 @@ namespace MakeYourChoice
             };
             var toolTipNotify = new ToolTip();
             toolTipNotify.SetToolTip(cbNotifyOnline, "Show a tray notification when your preferred server goes from offline to online.");
+            var cbStartup = new CheckBox
+            {
+                Text = "Start with Windows",
+                AutoSize = true,
+                Checked = _startWithWindows,
+                Margin = new Padding(3, 3, 3, 3)
+            };
+            var toolTipStartup = new ToolTip();
+            toolTipStartup.SetToolTip(cbStartup, "Launch Make Your Choice automatically when you log in (as a scheduled task, so it starts elevated without a UAC prompt).");
             tlpExperimental.Controls.Add(cbDarkMode, 0, 0);
             tlpExperimental.Controls.Add(cbMinimizeTray, 0, 1);
             tlpExperimental.Controls.Add(cbNotifyOnline, 0, 2);
+            tlpExperimental.Controls.Add(cbStartup, 0, 3);
             experimentalPanel.Controls.Add(tlpExperimental);
 
             // ── Game folder ────────────────────────────────────────────
@@ -2641,6 +2711,7 @@ namespace MakeYourChoice
                 cbDarkMode.Checked = false;
                 cbMinimizeTray.Checked = true;
                 cbNotifyOnline.Checked = false;
+                cbStartup.Checked = false;
             };
             buttonPanel.Controls.Add(btnOk);
             buttonPanel.Controls.Add(btnDefault);
@@ -2694,7 +2765,10 @@ namespace MakeYourChoice
                 _darkMode = cbDarkMode.Checked;
                 _minimizeToTray = cbMinimizeTray.Checked;
                 _notifyServerOnline = cbNotifyOnline.Checked;
+                bool startupChanged = _startWithWindows != cbStartup.Checked;
+                _startWithWindows = cbStartup.Checked;
                 SaveSettings();
+                if (startupChanged) SetAutoStart(_startWithWindows);
                 ApplyTheme();
                 UpdateRegionListViewAppearance();
                 
