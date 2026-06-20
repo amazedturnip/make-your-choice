@@ -198,7 +198,7 @@ fn set_auto_start(enable: bool) {
         };
         let _ = std::fs::create_dir_all(&dir);
         let content = format!(
-            "[Desktop Entry]\nType=Application\nName=Make Your Choice\nExec={}\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
+            "[Desktop Entry]\nType=Application\nName=Make Your Choice\nExec={} --autostart\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
             exe
         );
         let _ = std::fs::write(&file, content);
@@ -1055,7 +1055,23 @@ fn build_ui(app: &Application) {
     // Check for updates silently on launch
     check_for_updates_silent(&app_state, &window);
 
-    window.present();
+    // When auto-started at login (--autostart): go straight to the tray, or minimize to the
+    // taskbar if the tray is disabled/unavailable. Otherwise show the window normally.
+    let autostarted = std::env::args().any(|a| a == "--autostart" || a == "--minimized");
+    let minimize_to_tray = app_state
+        .settings
+        .lock()
+        .map(|s| s.minimize_to_tray)
+        .unwrap_or(true);
+    let tray_active = app_state.tray.borrow().is_some();
+    if autostarted && minimize_to_tray && tray_active {
+        // Start hidden in the tray (don't map the window); restore via the tray menu.
+    } else {
+        window.present();
+        if autostarted {
+            window.minimize();
+        }
+    }
 }
 
 fn create_version_menu(_window: &ApplicationWindow, _app_state: &Rc<AppState>) -> Menu {
