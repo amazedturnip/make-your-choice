@@ -8,6 +8,7 @@ mod aws_ranges;
 mod dbq;
 mod firewall;
 mod tray;
+mod beacon;
 
 use gio::{Menu, SimpleAction};
 use glib::Type;
@@ -87,8 +88,12 @@ struct AppState {
     aws_service: Arc<AwsIpService>,
     connected_to_label: Label,
     connection_dot: Label,
-    // AWS region code -> online(true)/offline(false), from Dead by Queue.
+    // AWS region code -> online(true)/offline(false). Primary source is the live GameLift beacon
+    // probe (for the selected region); Dead by Queue /regions fills in the rest as a fallback.
     dbq_online: RefCell<HashMap<String, bool>>,
+    // Last queue-time text for the preferred region, cached by the (slow) Dead by Queue poll and
+    // shown in the tray tooltip alongside the live (fast) beacon status.
+    last_queue_text: RefCell<String>,
     // System tray controller (None if the tray couldn't be started).
     tray: RefCell<Option<tray::TrayController>>,
     // For offline -> online notifications: the preferred region + its last seen online state.
@@ -849,6 +854,7 @@ fn build_ui(app: &Application) {
         connected_to_label: connected_value,
         connection_dot: connection_dot,
         dbq_online: RefCell::new(HashMap::new()),
+        last_queue_text: RefCell::new(String::new()),
         tray: RefCell::new(None),
         prev_pref_region: RefCell::new(None),
         prev_pref_online: RefCell::new(None),
@@ -1010,6 +1016,7 @@ fn build_ui(app: &Application) {
     // Start ping + Dead by Queue timers
     start_ping_timer(app_state.clone());
     start_dbq_timer(app_state.clone());
+    start_beacon_timer(app_state.clone());
 
     // System tray (best-effort; StatusNotifierItem — KDE native, GNOME needs AppIndicator ext).
     // Menu actions arrive on `rx`, polled here on the GTK main thread.
@@ -2515,8 +2522,9 @@ fn start_ping_timer(app_state: Rc<AppState>) {
     });
 }
 
-// Polls Dead by Queue every 30s: updates the per-region online map, the tray icon/tooltip, and
-// fires an offline -> online notification for the preferred server when enabled.
+// Slow Dead by Queue poll (30s): caches the per-region online map (fallback for non-selected
+// regions) and the preferred region's queue-time text. The fast beacon timer owns the live tray
+// status + notifications.
 fn start_dbq_timer(app_state: Rc<AppState>) {
     glib::timeout_add_seconds_local(30, move || {
         let runtime = app_state.tokio_runtime.clone();
@@ -2527,40 +2535,79 @@ fn start_dbq_timer(app_state: Rc<AppState>) {
                 .await
                 .unwrap_or_default();
             if !status.is_empty() {
-                *app_state.dbq_online.borrow_mut() = status;
+                let mut map = app_state.dbq_online.borrow_mut();
+                for (k, v) in status {
+                    map.insert(k, v);
+                }
             }
 
+            if let Some(pref) = preferred_region(&app_state) {
+                if let Some(c) = aws_code_for_region(&app_state.regions, &pref) {
+                    let queue = runtime
+                        .spawn(async move { dbq::get_queue(&c).await })
+                        .await
+                        .map(|(t, _)| t)
+                        .unwrap_or_default();
+                    *app_state.last_queue_text.borrow_mut() = queue;
+                }
+            }
+        });
+        glib::ControlFlow::Continue
+    });
+}
+
+// Fast live status (5s): probes ONLY the selected region's GameLift ping beacon directly
+// (beacon-primary), falling back to the cached Dead by Queue map when the probe is inconclusive.
+// Owns the tray icon/tooltip and the offline -> online notification for the preferred server.
+fn start_beacon_timer(app_state: Rc<AppState>) {
+    glib::timeout_add_seconds_local(5, move || {
+        let runtime = app_state.tokio_runtime.clone();
+        let app_state = app_state.clone();
+        glib::spawn_future_local(async move {
             let Some(pref) = preferred_region(&app_state) else {
                 if let Some(t) = app_state.tray.borrow().as_ref() {
                     t.update(None, "Select a region to track".to_string());
                 }
+                *app_state.prev_pref_region.borrow_mut() = None;
+                *app_state.prev_pref_online.borrow_mut() = None;
                 return;
             };
             let code = aws_code_for_region(&app_state.regions, &pref);
-            let online = code
-                .as_ref()
-                .and_then(|c| app_state.dbq_online.borrow().get(c).copied());
+            let ping_host = app_state
+                .regions
+                .get(&pref)
+                .and_then(|i| i.hosts.get(1).or_else(|| i.hosts.first()))
+                .cloned();
+
+            // Beacon is primary; fall back to the cached Dead by Queue map when inconclusive (None).
+            let mut online = match ping_host {
+                Some(h) => runtime
+                    .spawn(async move { beacon::is_fleet_online(&h, 1500).await })
+                    .await
+                    .unwrap_or(None),
+                None => None,
+            };
+            if online.is_none() {
+                online = code
+                    .as_ref()
+                    .and_then(|c| app_state.dbq_online.borrow().get(c).copied());
+            }
+            // Feed the live result back into the map so the latency list tracks it too.
+            if let (Some(o), Some(c)) = (online, code.clone()) {
+                app_state.dbq_online.borrow_mut().insert(c, o);
+            }
+
             let short = pref
                 .split('(')
                 .nth(1)
                 .map(|s| s.trim_end_matches(')').to_string())
                 .unwrap_or_else(|| pref.clone());
-
-            let queue = if let Some(c) = code.clone() {
-                runtime
-                    .spawn(async move { dbq::get_queue(&c).await })
-                    .await
-                    .map(|(t, _)| t)
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            };
-
             let state_str = match online {
                 Some(true) => "ONLINE",
                 Some(false) => "OFFLINE",
                 None => "status unknown",
             };
+            let queue = app_state.last_queue_text.borrow().clone();
             if let Some(t) = app_state.tray.borrow().as_ref() {
                 t.update(online, format!("{}: {} | {}", short, state_str, queue));
             }
