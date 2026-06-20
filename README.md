@@ -29,12 +29,20 @@ The application needs to be run with [administrator permissions](https://learn.m
 ## Hard Region Lock (Windows)
 Selecting a region edits your hosts file so the **client** stops measuring latency to the other regions, which makes DBD prefer the one you left. That's enough to *prefer* a region, but it can't stop DBD's **server-side fallback to N. Virginia** (`us-east-1`): you can't hosts-block Virginia (EAC/matchmaking/startup live there), and a match connects to a raw server IP over **UDP**, not a hostname.
 
-**Options → Hard region lock (firewall)…** closes that gap. Tick the regions to block (N. Virginia is pre-selected) and the app pulls AWS's published IP ranges to create Windows Firewall rules that block **outbound UDP 7770–7820** (the GameLift ping beacon + game-server ports) to them:
+The **Use hard region lock (firewall) to force exclude unchosen servers** option in **Program settings** closes that gap. When it's on, applying your selection also creates Windows Firewall rules that block **outbound UDP 7770–7820** (the GameLift ping beacon + game-server ports) to every region you did **not** choose — using AWS's published IP ranges:
 
 - EAC / matchmaking / startup use **TCP 443**, which is never touched — the game still launches.
-- If DBD tries to drop you onto a blocked region the match **can't connect**, so it fails/re-queues instead of putting you there.
+- If DBD tries to drop you onto an unchosen region the match **can't connect**, so it fails/re-queues instead of putting you there.
 
-Keep the region you want (e.g. Ohio) selected in the main list and apply the lock on N. Virginia. Use **Remove lock** to undo — the rules persist across reboots and are *not* cleared by “Reset hosts file”. Requires running as administrator.
+It's two-way: pick your region (e.g. Ohio) and click **Apply Selection** with the toggle on to lock; turning the toggle off removes the rules. (Makes choosing solo unstable servers more reliable.) Requires running as administrator. The rules persist across reboots and are *not* cleared by “Reset hosts file”.
+
+## Live server status & system tray (Windows)
+Real online/offline status for the unstable servers comes from the public [Dead by Queue](https://www.deadbyqueue.com) API (`/regions`), shown as ✓ (online) / ⚠ (offline) next to those servers in the list. The app also adds two **system-tray indicators**:
+
+- **Preferred server** — a green/red dot showing whether your chosen server is currently online.
+- **Killer queue** — the current killer queue time (minutes) for that server, from Dead by Queue.
+
+Minimizing the window now sends it to the **system tray** instead of the taskbar; double-click either tray icon (or right-click → *Show*) to restore.
 
 # Installation: Linux / SteamOS
 > [!NOTE]

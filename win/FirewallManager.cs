@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading.Tasks;
 
 namespace MakeYourChoice
@@ -10,29 +12,29 @@ namespace MakeYourChoice
     /// "Hard region lock" — blocks the game-server DATA PLANE (UDP) to unwanted AWS regions using
     /// Windows Firewall, while leaving the TCP control plane (EAC, matchmaking, startup) untouched.
     ///
-    /// Why this exists: the hosts file can only block DNS for the GameLift latency beacons and the
-    /// service endpoint. It cannot stop DBD from connecting to a game server it has already been
-    /// placed on, because that connection is made to a raw EC2 IP over UDP (ports ~7777-7820), not
-    /// to a hostname. DBD's fallback to N. Virginia (us-east-1) is decided server-side and ignores
-    /// the client's latency reports, so the only client-side way to NOT play on Virginia is to make
-    /// its game servers unreachable. We block outbound UDP 7770-7820 to the region's IP ranges:
-    ///   - 7770 = GameLift ping beacon (so the client can't even report latency for the region)
-    ///   - 7777-7820 = the actual game-server port range (so a fallback match can't connect)
-    /// EAC and matchmaking use TCP 443, which we never touch, so the game still starts normally.
-    /// If DBD is placed on a blocked region the connection simply fails and DBD re-queues / errors
-    /// instead of dropping you into that region's match.
+    /// The hosts file can only block DNS for the GameLift latency beacons and service endpoint; it
+    /// can't stop DBD connecting to a game server it has already been placed on, because that
+    /// connection is to a raw EC2 IP over UDP (~7777-7820), not a hostname. DBD's server-side
+    /// fallback to N. Virginia ignores the client's latency reports, so the only client-side way to
+    /// NOT play there is to make those game servers unreachable. We block outbound UDP 7770-7820
+    /// (ping beacon + game-server range) to the region IP ranges; EAC/matchmaking use TCP 443 and
+    /// are never touched, so the game still launches. A blocked-region match simply can't connect.
     /// </summary>
     public static class FirewallManager
     {
         public const string RuleGroup = "MakeYourChoice RegionLock";
         private const string BlockedUdpPorts = "7770-7820";
-        private const int ChunkSize = 250; // CIDRs per firewall rule (keeps the command line small)
+        private const int ChunkSize = 1000; // CIDRs per firewall rule
 
         public static async Task<(bool ok, string message)> ApplyLockAsync(
             AwsIpService aws, ISet<string> blockRegionCodes)
         {
             if (blockRegionCodes == null || blockRegionCodes.Count == 0)
-                return (false, "No regions to block were specified.");
+            {
+                // Nothing to block (e.g. every region is allowed) -> ensure no stale lock remains.
+                RemoveLock();
+                return (true, "No regions to block; any existing lock was removed.");
+            }
 
             try
             {
@@ -40,33 +42,14 @@ namespace MakeYourChoice
                 if (cidrs.Count == 0)
                     return (false, "Could not fetch AWS IP ranges (no internet?). No changes were made.");
 
-                // Replace any previous lock so we never stack stale rules.
-                RemoveLock();
-
-                int idx = 0, ruleNum = 0;
-                while (idx < cidrs.Count)
+                var (code, err) = await Task.Run(() => RunPowerShellScript(BuildApplyScript(cidrs)));
+                if (code != 0)
                 {
-                    var chunk = cidrs.Skip(idx).Take(ChunkSize).ToList();
-                    idx += ChunkSize;
-                    ruleNum++;
-                    var addrs = string.Join(",", chunk);
-                    var name = $"{RuleGroup} {ruleNum}";
-                    var ps = $"New-NetFirewallRule -DisplayName '{name}' -Group '{RuleGroup}' " +
-                             $"-Description 'Blocks DBD game-server UDP traffic to unwanted AWS regions.' " +
-                             $"-Direction Outbound -Action Block -Protocol UDP " +
-                             $"-RemotePort {BlockedUdpPorts} -RemoteAddress {addrs} | Out-Null";
-                    var (code, err) = RunPowerShell(ps);
-                    if (code != 0)
-                    {
-                        RemoveLock();
-                        return (false, $"Failed to create firewall rule (run as Administrator?). {err}".Trim());
-                    }
+                    RemoveLock();
+                    return (false, $"Failed to create firewall rules (run as Administrator?). {err}".Trim());
                 }
-
                 return (true,
-                    $"Hard lock applied.\nBlocked UDP {BlockedUdpPorts} to {cidrs.Count} IP ranges " +
-                    $"across {blockRegionCodes.Count} region(s).\n\nEAC / matchmaking (TCP 443) are untouched, " +
-                    "so the game still starts. A blocked-region match simply won't connect.");
+                    $"blocked UDP {BlockedUdpPorts} to {cidrs.Count} IP ranges across {blockRegionCodes.Count} region(s)");
             }
             catch (Exception ex)
             {
@@ -74,27 +57,70 @@ namespace MakeYourChoice
             }
         }
 
+        private static string BuildApplyScript(List<string> cidrs)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("$ErrorActionPreference = 'Stop'");
+            sb.AppendLine($"Remove-NetFirewallRule -Group '{RuleGroup}' -ErrorAction SilentlyContinue");
+            int ruleNum = 0;
+            for (int i = 0; i < cidrs.Count; i += ChunkSize)
+            {
+                ruleNum++;
+                var chunk = cidrs.Skip(i).Take(ChunkSize).Select(c => "'" + c + "'");
+                sb.AppendLine($"$a{ruleNum} = @({string.Join(",", chunk)})");
+                sb.AppendLine(
+                    $"New-NetFirewallRule -DisplayName '{RuleGroup} {ruleNum}' -Group '{RuleGroup}' " +
+                    $"-Description 'Blocks DBD game-server UDP traffic to unchosen AWS regions.' " +
+                    $"-Direction Outbound -Action Block -Protocol UDP -RemotePort {BlockedUdpPorts} " +
+                    $"-RemoteAddress $a{ruleNum} | Out-Null");
+            }
+            return sb.ToString();
+        }
+
         public static bool IsLockActive()
         {
-            var (code, _) = RunPowerShell(
+            var (code, _) = RunPowerShellCommand(
                 $"if (Get-NetFirewallRule -Group '{RuleGroup}' -ErrorAction SilentlyContinue) {{ exit 0 }} else {{ exit 1 }}");
             return code == 0;
         }
 
         public static void RemoveLock()
         {
-            RunPowerShell($"Remove-NetFirewallRule -Group '{RuleGroup}' -ErrorAction SilentlyContinue");
+            RunPowerShellCommand($"Remove-NetFirewallRule -Group '{RuleGroup}' -ErrorAction SilentlyContinue");
         }
 
-        private static (int code, string stderr) RunPowerShell(string command)
+        private static (int code, string stderr) RunPowerShellScript(string script)
+        {
+            string path = Path.Combine(Path.GetTempPath(), "myc_regionlock_" + Guid.NewGuid().ToString("N") + ".ps1");
+            try
+            {
+                File.WriteAllText(path, script, new UTF8Encoding(false));
+                return RunPowerShell($"-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{path}\"");
+            }
+            catch (Exception ex)
+            {
+                return (-1, ex.Message);
+            }
+            finally
+            {
+                try { File.Delete(path); } catch { /* best effort */ }
+            }
+        }
+
+        private static (int code, string stderr) RunPowerShellCommand(string command)
+        {
+            return RunPowerShell(
+                "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"" + command.Replace("\"", "\\\"") + "\"");
+        }
+
+        private static (int code, string stderr) RunPowerShell(string arguments)
         {
             try
             {
                 var psi = new ProcessStartInfo
                 {
                     FileName = "powershell.exe",
-                    Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \""
-                                + command.Replace("\"", "\\\"") + "\"",
+                    Arguments = arguments,
                     CreateNoWindow = true,
                     UseShellExecute = false,
                     RedirectStandardError = true,
