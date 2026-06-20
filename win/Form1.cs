@@ -2400,7 +2400,7 @@ namespace MakeYourChoice
                 Margin = new Padding(3, 8, 3, 3)
             };
             var toolTipHardLock = new ToolTip();
-            toolTipHardLock.SetToolTip(cbHardLock, "Makes choosing solo unstable servers more reliable, at the cost of not being able to connect to other servers if it's offline");
+            toolTipHardLock.SetToolTip(cbHardLock, "Makes choosing solo unstable servers more reliable, at the cost of not being able to connect to other servers if it's offline. With 'Merge unstable servers' also on, the similar stable servers stay allowed too — everything else is blocked.");
 
             tlpBlock.Controls.Add(rbBoth, 0, 0);
             tlpBlock.Controls.Add(rbPing, 0, 1);
@@ -2720,6 +2720,11 @@ namespace MakeYourChoice
                     "#       ::1             localhost\r\n";
 
                 File.WriteAllText(HostsPath, defaultHosts);
+
+                // Reverting to default also clears the hard region lock's firewall rules.
+                FirewallManager.RemoveLock();
+                _useHardLock = false;
+                SaveSettings();
 
                 // Attempt to flush DNS (best effort)
                 try

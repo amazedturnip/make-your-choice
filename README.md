@@ -34,7 +34,7 @@ The **Use hard region lock (firewall) to force exclude unchosen servers** option
 - EAC / matchmaking / startup use **TCP 443**, which is never touched — the game still launches.
 - If DBD tries to drop you onto an unchosen region the match **can't connect**, so it fails/re-queues instead of putting you there.
 
-It's two-way: pick your region (e.g. Ohio) and click **Apply Selection** with the toggle on to lock; turning the toggle off removes the rules. (Makes choosing solo unstable servers more reliable.) Requires running as administrator. The rules persist across reboots and are *not* cleared by “Reset hosts file”.
+It's two-way: pick your region (e.g. Ohio) and click **Apply Selection** with the toggle on to lock; turning the toggle off (or **Reset hosts file**) removes the rules. With **Merge unstable servers** also on, the merged similar (stable) servers stay allowed too — everything else is still blocked, so an unstable pick falls back only to its similar server, never to the rest. Requires running as administrator.
 
 ## Live server status & system tray (Windows)
 Real online/offline status for the unstable servers comes from the public [Dead by Queue](https://www.deadbyqueue.com) API (`/regions`), shown as ✓ (online) / ⚠ (offline) next to those servers in the list.
