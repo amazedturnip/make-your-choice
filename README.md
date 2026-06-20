@@ -45,6 +45,11 @@ By default, minimizing the window sends it to the **system tray** instead of the
 
 > The standalone/portable build is the single-file `MakeYourChoice.exe` in the **`publish\`** folder — it runs from anywhere. (The loose exe under `win-x64\` needs its sibling files and won't run if copied alone.)
 
+A **Notify when preferred server comes online** toggle (Program settings) shows a notification the moment your preferred server flips from offline to online.
+
+### Linux notes
+All of the above is also available on Linux (GTK build): the hard region lock uses **nftables** (`nft`, via a one-time `pkexec` prompt) instead of Windows Firewall; live status and the offline→online notification use the same Dead by Queue API and native desktop notifications; and the tray uses **StatusNotifierItem** (native on KDE Plasma; on GNOME it needs the AppIndicator/KStatusNotifier extension). On Linux the close button hides to the tray (rather than a separate minimize action).
+
 # Installation: Linux / SteamOS
 > [!NOTE]
 > **For SteamOS users**: There are two ways to use Make Your Choice:  

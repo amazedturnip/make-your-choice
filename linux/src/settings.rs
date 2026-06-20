@@ -12,6 +12,22 @@ pub struct UserSettings {
     pub last_launched_version: String,
     pub game_path: String,
     pub auto_update_check_paused_until: Option<String>,
+    // Hard region lock: firewall-block the game-server data plane of unchosen regions on apply.
+    #[serde(default)]
+    pub use_hard_lock: bool,
+    // Minimize (close button) hides to the system tray instead of quitting.
+    #[serde(default = "default_true")]
+    pub minimize_to_tray: bool,
+    // Notify when the preferred server transitions offline -> online.
+    #[serde(default)]
+    pub notify_server_online: bool,
+    // Last session's ticked regions, restored on launch.
+    #[serde(default)]
+    pub selected_regions: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for UserSettings {
@@ -23,6 +39,10 @@ impl Default for UserSettings {
             last_launched_version: String::new(),
             game_path: String::new(),
             auto_update_check_paused_until: None,
+            use_hard_lock: false,
+            minimize_to_tray: true,
+            notify_server_online: false,
+            selected_regions: Vec::new(),
         }
     }
 }
