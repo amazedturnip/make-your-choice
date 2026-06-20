@@ -167,6 +167,8 @@ namespace MakeYourChoice
         private bool _minimizeToTray = true;
         // Notify (tray balloon) when the preferred server transitions offline -> online.
         private bool _notifyServerOnline = false;
+        // How often (seconds) the GameLift beacon probe and the Dead by Queue poll run.
+        private int _pollIntervalSeconds = 60;
         // Start automatically at Windows logon (via a scheduled task so the elevated app launches
         // without a UAC prompt each login).
         private bool _startWithWindows = false;
@@ -218,6 +220,7 @@ namespace MakeYourChoice
             public bool UseHardRegionLock { get; set; }
             public bool MinimizeToTray { get; set; } = true;
             public bool NotifyServerOnline { get; set; }
+            public int PollIntervalSeconds { get; set; } = 60;
             public bool StartWithWindows { get; set; }
             public List<string> SelectedRegions { get; set; }
         }
@@ -246,6 +249,7 @@ namespace MakeYourChoice
                     _useHardLock = settings.UseHardRegionLock;
                     _minimizeToTray = settings.MinimizeToTray;
                     _notifyServerOnline = settings.NotifyServerOnline;
+                    _pollIntervalSeconds = settings.PollIntervalSeconds >= 5 ? settings.PollIntervalSeconds : 60;
                     _startWithWindows = settings.StartWithWindows;
                     _savedSelection = settings.SelectedRegions ?? new List<string>();
                 }
@@ -279,6 +283,7 @@ namespace MakeYourChoice
                     UseHardRegionLock = _useHardLock,
                     MinimizeToTray = _minimizeToTray,
                     NotifyServerOnline = _notifyServerOnline,
+                    PollIntervalSeconds = _pollIntervalSeconds,
                     StartWithWindows = _startWithWindows,
                     SelectedRegions = GetCheckedRegionKeys(),
                 };
@@ -2560,7 +2565,7 @@ namespace MakeYourChoice
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 ColumnCount = 1,
-                RowCount = 4
+                RowCount = 5
             };
             var cbDarkMode = new CheckBox
             {
@@ -2596,10 +2601,39 @@ namespace MakeYourChoice
             };
             var toolTipStartup = new ToolTip();
             toolTipStartup.SetToolTip(cbStartup, "Launch Make Your Choice automatically when you log in (as a scheduled task, so it starts elevated without a UAC prompt).");
+            var lblPoll = new Label
+            {
+                Text = "Server status poll interval (sec):",
+                AutoSize = true,
+                Margin = new Padding(3, 7, 3, 3)
+            };
+            var nudPollInterval = new NumericUpDown
+            {
+                Minimum = 5,
+                Maximum = 600,
+                Increment = 5,
+                Value = Math.Min(600, Math.Max(5, _pollIntervalSeconds)),
+                Width = 64,
+                Margin = new Padding(3, 4, 3, 3)
+            };
+            var toolTipPoll = new ToolTip();
+            toolTipPoll.SetToolTip(nudPollInterval, "How often the GameLift beacon and Dead by Queue status are checked (seconds). Higher is lighter on the network; lower notices a server coming online sooner. Default 60.");
+            var pollPanel = new FlowLayoutPanel
+            {
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                Margin = new Padding(0)
+            };
+            pollPanel.Controls.Add(lblPoll);
+            pollPanel.Controls.Add(nudPollInterval);
+
             tlpExperimental.Controls.Add(cbDarkMode, 0, 0);
             tlpExperimental.Controls.Add(cbMinimizeTray, 0, 1);
             tlpExperimental.Controls.Add(cbNotifyOnline, 0, 2);
             tlpExperimental.Controls.Add(cbStartup, 0, 3);
+            tlpExperimental.Controls.Add(pollPanel, 0, 4);
             experimentalPanel.Controls.Add(tlpExperimental);
 
             // ── Game folder ────────────────────────────────────────────
@@ -2712,6 +2746,7 @@ namespace MakeYourChoice
                 cbMinimizeTray.Checked = true;
                 cbNotifyOnline.Checked = false;
                 cbStartup.Checked = false;
+                nudPollInterval.Value = 60;
             };
             buttonPanel.Controls.Add(btnOk);
             buttonPanel.Controls.Add(btnDefault);
@@ -2765,6 +2800,8 @@ namespace MakeYourChoice
                 _darkMode = cbDarkMode.Checked;
                 _minimizeToTray = cbMinimizeTray.Checked;
                 _notifyServerOnline = cbNotifyOnline.Checked;
+                _pollIntervalSeconds = (int)nudPollInterval.Value;
+                ApplyPollInterval();
                 bool startupChanged = _startWithWindows != cbStartup.Checked;
                 _startWithWindows = cbStartup.Checked;
                 SaveSettings();

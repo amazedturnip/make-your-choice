@@ -60,18 +60,28 @@ namespace MakeYourChoice
 
         private void StartDbqTimer()
         {
+            int ms = Math.Max(5, _pollIntervalSeconds) * 1000;
+
             // Slow poll: fills the fallback online map for non-selected regions and the preferred
             // region's queue-time text. The fast beacon timer owns the live status + notifications.
-            _dbqTimer = new Timer { Interval = 30_000 };
+            _dbqTimer = new Timer { Interval = ms };
             _dbqTimer.Tick += async (_, __) => await RefreshDbqAsync();
             _dbqTimer.Start();
             _ = RefreshDbqAsync(); // immediate first fetch
 
             // Fast poll: probe ONLY the selected region's GameLift beacon for real-time up/down.
-            _beaconTimer = new Timer { Interval = 5_000 };
+            _beaconTimer = new Timer { Interval = ms };
             _beaconTimer.Tick += async (_, __) => await UpdateTrayFromBeaconAsync();
             _beaconTimer.Start();
             _ = UpdateTrayFromBeaconAsync(); // immediate first probe
+        }
+
+        // Re-apply the configured poll interval to both timers (call after the option changes).
+        private void ApplyPollInterval()
+        {
+            int ms = Math.Max(5, _pollIntervalSeconds) * 1000;
+            if (_dbqTimer != null) _dbqTimer.Interval = ms;
+            if (_beaconTimer != null) _beaconTimer.Interval = ms;
         }
 
         // Slow Dead by Queue poll — caches data only; does not touch the tray (the beacon owns it).
