@@ -18,7 +18,7 @@ use gtk4::{
     CellRendererText, CheckButton, ComboBoxText, Dialog, Entry, FileChooserAction,
     FileChooserNative, FileFilter, Image, Label, ListStore, MenuButton, MessageDialog,
     MessageType, Orientation, PolicyType, ResponseType, ScrolledWindow, SelectionMode, Separator,
-    TreeView, TreeViewColumn,
+    SpinButton, TreeView, TreeViewColumn,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -99,6 +99,9 @@ struct AppState {
     // For offline -> online notifications: the preferred region + its last seen online state.
     prev_pref_region: RefCell<Option<String>>,
     prev_pref_online: RefCell<Option<bool>>,
+    // glib source IDs for the status timers, so they can be restarted when the poll interval changes.
+    dbq_source: RefCell<Option<glib::SourceId>>,
+    beacon_source: RefCell<Option<glib::SourceId>>,
 }
 
 // AWS region code (e.g. "us-east-2") from a region's first GameLift host.
@@ -858,6 +861,8 @@ fn build_ui(app: &Application) {
         tray: RefCell::new(None),
         prev_pref_region: RefCell::new(None),
         prev_pref_online: RefCell::new(None),
+        dbq_source: RefCell::new(None),
+        beacon_source: RefCell::new(None),
     });
 
     // Restore the previous session's ticked regions (and populate the selection set).
@@ -2206,6 +2211,17 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
         "Launch Make Your Choice automatically at login (adds an entry to ~/.config/autostart).",
     ));
 
+    let poll_label = Label::new(Some("Server status poll interval (seconds):"));
+    poll_label.set_halign(gtk4::Align::Start);
+    let poll_spin = SpinButton::with_range(5.0, 600.0, 5.0);
+    poll_spin.set_value(settings.poll_interval_seconds.max(5) as f64);
+    poll_spin.set_tooltip_text(Some(
+        "How often the GameLift beacon and Dead by Queue status are checked. Higher is lighter on the network; lower notices a server coming online sooner. Default 60.",
+    ));
+    let poll_row = GtkBox::new(Orientation::Horizontal, 6);
+    poll_row.append(&poll_label);
+    poll_row.append(&poll_spin);
+
     settings_box.append(&mode_label);
     settings_box.append(&mode_combo);
     settings_box.append(&mode_notice);
@@ -2219,6 +2235,7 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
     settings_box.append(&minimize_tray_check);
     settings_box.append(&notify_check);
     settings_box.append(&autostart_check);
+    settings_box.append(&poll_row);
     settings_box.append(&Separator::new(Orientation::Horizontal));
 
     // Game folder
@@ -2315,6 +2332,7 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
             settings.use_hard_lock = hard_lock_check.is_active();
             settings.minimize_to_tray = minimize_tray_check.is_active();
             settings.notify_server_online = notify_check.is_active();
+            settings.poll_interval_seconds = poll_spin.value() as u64;
             let autostart_changed = settings.auto_start != autostart_check.is_active();
             settings.auto_start = autostart_check.is_active();
             settings.game_path = game_path_text;
@@ -2325,6 +2343,9 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
             let hard_lock_turned_off = hard_lock_was_on && !settings.use_hard_lock;
             let autostart_now = settings.auto_start;
             drop(settings);
+
+            // Apply the (possibly changed) poll interval to the status timers immediately.
+            restart_status_timers(app_state_clone.clone());
 
             // Turning the hard lock off removes its firewall rules now (two-way).
             if hard_lock_turned_off {
@@ -2354,12 +2375,16 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
             settings.use_hard_lock = false;
             settings.minimize_to_tray = true;
             settings.notify_server_online = false;
+            settings.poll_interval_seconds = 60;
             let autostart_was_on = settings.auto_start;
             settings.auto_start = false;
             settings.game_path.clear();
 
             let _ = settings.save();
             drop(settings);
+
+            // Apply the default poll interval to the status timers immediately.
+            restart_status_timers(app_state_clone.clone());
 
             if hard_lock_was_on {
                 firewall::remove_lock();
@@ -2377,6 +2402,7 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
             minimize_tray_check.set_active(true);
             notify_check.set_active(false);
             autostart_check.set_active(false);
+            poll_spin.set_value(60.0);
 
             // Refresh the warning symbols in the list view
             refresh_warning_symbols(
@@ -2522,13 +2548,33 @@ fn start_ping_timer(app_state: Rc<AppState>) {
     });
 }
 
-// Slow Dead by Queue poll (30s): caches the per-region online map (fallback for non-selected
-// regions) and the preferred region's queue-time text. The fast beacon timer owns the live tray
-// status + notifications.
+// The configured status poll interval (seconds), clamped to a sane minimum.
+fn poll_interval_secs(app_state: &Rc<AppState>) -> u32 {
+    let s = app_state.settings.lock().unwrap().poll_interval_seconds;
+    s.max(5) as u32
+}
+
+// Stop and restart both status timers so a changed poll interval takes effect immediately.
+fn restart_status_timers(app_state: Rc<AppState>) {
+    if let Some(id) = app_state.dbq_source.borrow_mut().take() {
+        id.remove();
+    }
+    if let Some(id) = app_state.beacon_source.borrow_mut().take() {
+        id.remove();
+    }
+    start_dbq_timer(app_state.clone());
+    start_beacon_timer(app_state);
+}
+
+// Slow Dead by Queue poll: caches the per-region online map (fallback for non-selected regions)
+// and the preferred region's queue-time text. The beacon timer owns the live tray status +
+// notifications. Both run at the configurable poll interval (default 60s).
 fn start_dbq_timer(app_state: Rc<AppState>) {
-    glib::timeout_add_seconds_local(30, move || {
-        let runtime = app_state.tokio_runtime.clone();
-        let app_state = app_state.clone();
+    let secs = poll_interval_secs(&app_state);
+    let timer_state = app_state.clone();
+    let id = glib::timeout_add_seconds_local(secs, move || {
+        let runtime = timer_state.tokio_runtime.clone();
+        let app_state = timer_state.clone();
         glib::spawn_future_local(async move {
             let status = runtime
                 .spawn(async { dbq::get_region_status().await })
@@ -2554,15 +2600,18 @@ fn start_dbq_timer(app_state: Rc<AppState>) {
         });
         glib::ControlFlow::Continue
     });
+    *app_state.dbq_source.borrow_mut() = Some(id);
 }
 
-// Fast live status (5s): probes ONLY the selected region's GameLift ping beacon directly
-// (beacon-primary), falling back to the cached Dead by Queue map when the probe is inconclusive.
-// Owns the tray icon/tooltip and the offline -> online notification for the preferred server.
+// Live status: probes ONLY the selected region's GameLift ping beacon directly (beacon-primary),
+// falling back to the cached Dead by Queue map when the probe is inconclusive. Owns the tray
+// icon/tooltip and the offline -> online notification. Runs at the configurable poll interval.
 fn start_beacon_timer(app_state: Rc<AppState>) {
-    glib::timeout_add_seconds_local(5, move || {
-        let runtime = app_state.tokio_runtime.clone();
-        let app_state = app_state.clone();
+    let secs = poll_interval_secs(&app_state);
+    let timer_state = app_state.clone();
+    let id = glib::timeout_add_seconds_local(secs, move || {
+        let runtime = timer_state.tokio_runtime.clone();
+        let app_state = timer_state.clone();
         glib::spawn_future_local(async move {
             let Some(pref) = preferred_region(&app_state) else {
                 if let Some(t) = app_state.tray.borrow().as_ref() {
@@ -2629,6 +2678,7 @@ fn start_beacon_timer(app_state: Rc<AppState>) {
         });
         glib::ControlFlow::Continue
     });
+    *app_state.beacon_source.borrow_mut() = Some(id);
 }
 
 fn is_region_blocked_by_hosts(
