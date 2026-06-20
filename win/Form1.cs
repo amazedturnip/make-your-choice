@@ -165,6 +165,9 @@ namespace MakeYourChoice
         private bool _useHardLock = false;
         // When minimized, hide to the system tray instead of the taskbar (default on).
         private bool _minimizeToTray = true;
+        // Last session's ticked regions, restored on launch so the selection (and any matching
+        // firewall rules) is repopulated. Updated whenever settings are saved.
+        private List<string> _savedSelection = new();
         private Label _lblConnectedToValue;
         private Label _lblConnectionDot; 
         private TrafficSniffer _sniffer;
@@ -205,6 +208,7 @@ namespace MakeYourChoice
             public bool DarkMode { get; set; }
             public bool UseHardRegionLock { get; set; }
             public bool MinimizeToTray { get; set; } = true;
+            public List<string> SelectedRegions { get; set; }
         }
 
         private void LoadSettings()
@@ -230,6 +234,7 @@ namespace MakeYourChoice
                     _darkMode = settings.DarkMode;
                     _useHardLock = settings.UseHardRegionLock;
                     _minimizeToTray = settings.MinimizeToTray;
+                    _savedSelection = settings.SelectedRegions ?? new List<string>();
                 }
             }
             catch
@@ -239,6 +244,7 @@ namespace MakeYourChoice
             // Apply theme after loading
             ApplyTheme();
             UpdateRegionListViewAppearance();
+            RestoreSelection();
         }
 
         private void SaveSettings()
@@ -259,6 +265,7 @@ namespace MakeYourChoice
                     DarkMode = _darkMode,
                     UseHardRegionLock = _useHardLock,
                     MinimizeToTray = _minimizeToTray,
+                    SelectedRegions = GetCheckedRegionKeys(),
                 };
                 var serializer = new SerializerBuilder().Build();
                 var yaml = serializer.Serialize(settings);
@@ -268,6 +275,30 @@ namespace MakeYourChoice
             {
                 // ignore save errors
             }
+        }
+
+        // Region keys currently ticked in the main list (falls back to the saved set if the list
+        // isn't built yet). Also refreshes _savedSelection so it stays current.
+        private List<string> GetCheckedRegionKeys()
+        {
+            if (_lv == null || _lv.IsDisposed)
+                return _savedSelection ?? new List<string>();
+            var list = new List<string>();
+            foreach (ListViewItem item in _lv.CheckedItems)
+                if (item.Tag is string key) list.Add(key);
+            _savedSelection = list;
+            return list;
+        }
+
+        // Re-tick the regions selected in the previous session.
+        private void RestoreSelection()
+        {
+            if (_lv == null || _lv.IsDisposed || _savedSelection == null || _savedSelection.Count == 0)
+                return;
+            var set = new HashSet<string>(_savedSelection);
+            foreach (ListViewItem item in _lv.Items)
+                if (item.Tag is string key)
+                    item.Checked = set.Contains(key);
         }
 
         // Extract the AWS region code (e.g. "us-east-2") from a GameLift hostname such as
@@ -582,6 +613,8 @@ namespace MakeYourChoice
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
+            // Remember this session's ticked regions for next launch.
+            try { SaveSettings(); } catch { /* ignore */ }
             if (_sniffer != null)
             {
                 _sniffer.TrafficDetected -= OnTrafficDetected;
@@ -2055,6 +2088,10 @@ namespace MakeYourChoice
                 }
                 catch { /* ignore */ }
 
+                // Persist the ticked selection so it's repopulated next launch (matching any
+                // firewall rules we're about to apply).
+                SaveSettings();
+
                 // Hard region lock: when enabled, also firewall-block the game-server data plane of
                 // every region NOT chosen, so DBD's server-side fallback can't place you there.
                 string lockNote = "";
@@ -2400,7 +2437,7 @@ namespace MakeYourChoice
                 Margin = new Padding(3, 8, 3, 3)
             };
             var toolTipHardLock = new ToolTip();
-            toolTipHardLock.SetToolTip(cbHardLock, "Makes choosing solo unstable servers more reliable, at the cost of not being able to connect to other servers if it's offline. With 'Merge unstable servers' also on, the similar stable servers stay allowed too — everything else is blocked.");
+            toolTipHardLock.SetToolTip(cbHardLock, "Makes choosing solo unstable servers more reliable, at the cost of not being able to connect to other servers if it's offline. With 'Merge unstable servers' also on, the similar stable servers stay allowed too. Everything else is blocked.");
 
             tlpBlock.Controls.Add(rbBoth, 0, 0);
             tlpBlock.Controls.Add(rbPing, 0, 1);
