@@ -165,6 +165,8 @@ namespace MakeYourChoice
         private bool _useHardLock = false;
         // When minimized, hide to the system tray instead of the taskbar (default on).
         private bool _minimizeToTray = true;
+        // Notify (tray balloon) when the preferred server transitions offline -> online.
+        private bool _notifyServerOnline = false;
         // Last session's ticked regions, restored on launch so the selection (and any matching
         // firewall rules) is repopulated. Updated whenever settings are saved.
         private List<string> _savedSelection = new();
@@ -208,6 +210,7 @@ namespace MakeYourChoice
             public bool DarkMode { get; set; }
             public bool UseHardRegionLock { get; set; }
             public bool MinimizeToTray { get; set; } = true;
+            public bool NotifyServerOnline { get; set; }
             public List<string> SelectedRegions { get; set; }
         }
 
@@ -234,6 +237,7 @@ namespace MakeYourChoice
                     _darkMode = settings.DarkMode;
                     _useHardLock = settings.UseHardRegionLock;
                     _minimizeToTray = settings.MinimizeToTray;
+                    _notifyServerOnline = settings.NotifyServerOnline;
                     _savedSelection = settings.SelectedRegions ?? new List<string>();
                 }
             }
@@ -265,6 +269,7 @@ namespace MakeYourChoice
                     DarkMode = _darkMode,
                     UseHardRegionLock = _useHardLock,
                     MinimizeToTray = _minimizeToTray,
+                    NotifyServerOnline = _notifyServerOnline,
                     SelectedRegions = GetCheckedRegionKeys(),
                 };
                 var serializer = new SerializerBuilder().Build();
@@ -2098,7 +2103,7 @@ namespace MakeYourChoice
                 var (lockOk, lockMsg) = await ReconcileHardLockAsync(allowedSet);
                 if (_useHardLock)
                     lockNote = lockOk
-                        ? "\n\nHard region lock applied — unchosen servers' game traffic is firewall-blocked."
+                        ? "\n\nHard region lock applied. Unchosen servers' game traffic is firewall-blocked."
                         : "\n\nHard region lock could NOT be applied: " + lockMsg;
 
                 MessageBox.Show(
@@ -2495,7 +2500,7 @@ namespace MakeYourChoice
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 ColumnCount = 1,
-                RowCount = 2
+                RowCount = 3
             };
             var cbDarkMode = new CheckBox
             {
@@ -2513,8 +2518,18 @@ namespace MakeYourChoice
             };
             var toolTipTray = new ToolTip();
             toolTipTray.SetToolTip(cbMinimizeTray, "When minimized, hide to the system tray instead of the taskbar. The tray icon shows your preferred server's online status.");
+            var cbNotifyOnline = new CheckBox
+            {
+                Text = "Notify when preferred server comes online",
+                AutoSize = true,
+                Checked = _notifyServerOnline,
+                Margin = new Padding(3, 3, 3, 3)
+            };
+            var toolTipNotify = new ToolTip();
+            toolTipNotify.SetToolTip(cbNotifyOnline, "Show a tray notification when your preferred server goes from offline to online.");
             tlpExperimental.Controls.Add(cbDarkMode, 0, 0);
             tlpExperimental.Controls.Add(cbMinimizeTray, 0, 1);
+            tlpExperimental.Controls.Add(cbNotifyOnline, 0, 2);
             experimentalPanel.Controls.Add(tlpExperimental);
 
             // ── Game folder ────────────────────────────────────────────
@@ -2625,6 +2640,7 @@ namespace MakeYourChoice
                 tbGamePath.Text = string.Empty;
                 cbDarkMode.Checked = false;
                 cbMinimizeTray.Checked = true;
+                cbNotifyOnline.Checked = false;
             };
             buttonPanel.Controls.Add(btnOk);
             buttonPanel.Controls.Add(btnDefault);
@@ -2677,6 +2693,7 @@ namespace MakeYourChoice
                 _gamePath = gamePathText;
                 _darkMode = cbDarkMode.Checked;
                 _minimizeToTray = cbMinimizeTray.Checked;
+                _notifyServerOnline = cbNotifyOnline.Checked;
                 SaveSettings();
                 ApplyTheme();
                 UpdateRegionListViewAppearance();

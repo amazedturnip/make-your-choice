@@ -23,6 +23,9 @@ namespace MakeYourChoice
         private Timer _dbqTimer;
         private bool _minimizeBalloonShown;
         private bool _exiting;
+        // For offline -> online notifications: the preferred region and its last seen online state.
+        private string _prevPreferredRegion;
+        private bool? _prevPreferredOnline;
 
         // AWS region code -> online(true)/offline(false), from Dead by Queue /regions.
         // Read by the latency list to show a ✓ / ⚠ next to unstable servers.
@@ -89,6 +92,18 @@ namespace MakeYourChoice
             Color bubble = online == true ? Color.LimeGreen : online == false ? Color.Red : Color.Gray;
             string state = online == true ? "ONLINE" : online == false ? "OFFLINE" : "status unknown";
             SetTrayIcon(MakeStatusIcon(bubble));
+
+            // Notify on an offline -> online transition for the same preferred region.
+            if (_notifyServerOnline
+                && string.Equals(_prevPreferredRegion, preferred, StringComparison.Ordinal)
+                && _prevPreferredOnline == false && online == true)
+            {
+                _tray.BalloonTipTitle = "Server online";
+                _tray.BalloonTipText = $"{shortName} is now online.";
+                try { _tray.ShowBalloonTip(4000); } catch { }
+            }
+            _prevPreferredRegion = preferred;
+            _prevPreferredOnline = online;
 
             var (queueText, _) = await DbqClient.GetQueueAsync(code ?? "");
             if (_tray != null)
