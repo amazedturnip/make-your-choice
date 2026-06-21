@@ -55,10 +55,91 @@ pub struct SweepSummary {
     pub first_live: Option<(String, u16)>,
 }
 
-fn handshake() -> Vec<u8> {
+fn bootstrap_handshake() -> Vec<u8> {
     (0..UE_HANDSHAKE_HEX.len() / 2)
         .map(|i| u8::from_str_radix(&UE_HANDSHAKE_HEX[i * 2..i * 2 + 2], 16).unwrap_or(0))
         .collect()
+}
+
+// The handshake learned live from the game's own traffic (survives DBD patches). None until seen.
+fn learned_handshake() -> &'static Mutex<Option<Vec<u8>>> {
+    static HS: OnceLock<Mutex<Option<Vec<u8>>>> = OnceLock::new();
+    HS.get_or_init(|| Mutex::new(load_learned()))
+}
+
+fn handshake_path() -> std::path::PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("make-your-choice")
+        .join("handshake.hex")
+}
+
+fn load_learned() -> Option<Vec<u8>> {
+    let hex = std::fs::read_to_string(handshake_path()).ok()?;
+    let hex = hex.trim();
+    if hex.len() < 18 || hex.len() % 2 != 0 {
+        return None;
+    }
+    (0..hex.len() / 2)
+        .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok())
+        .collect()
+}
+
+// The handshake we currently probe with: learned-from-live if we have one, else bootstrap.
+fn active_handshake() -> Vec<u8> {
+    if let Ok(g) = learned_handshake().lock() {
+        if let Some(ref hs) = *g {
+            return hs.clone();
+        }
+    }
+    bootstrap_handshake()
+}
+
+// Current build magic = bytes 5..8 of the active handshake; tracks the live handshake across updates.
+fn active_magic() -> [u8; 4] {
+    let hs = active_handshake();
+    if hs.len() >= 9 {
+        [hs[5], hs[6], hs[7], hs[8]]
+    } else {
+        MAGIC
+    }
+}
+
+/// Adopt a UE InitialConnect handshake captured live from the game's own traffic as the probe
+/// template. If the magic differs from what we had, that's a netcode patch — log it and auto-update
+/// (no manual recapture needed). Persisted so it survives restarts.
+pub fn set_learned_handshake(payload: &[u8]) {
+    if payload.len() < 18 || payload[0] != 0xB8 {
+        return;
+    }
+    if let Ok(mut g) = learned_handshake().lock() {
+        let current = g.clone().unwrap_or_else(bootstrap_handshake);
+        let same_magic = current.len() >= 9
+            && current[5] == payload[5]
+            && current[6] == payload[6]
+            && current[7] == payload[7]
+            && current[8] == payload[8];
+        if g.is_some() && same_magic {
+            return; // already current -> no churn
+        }
+        *g = Some(payload.to_vec());
+        let p = handshake_path();
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let hex: String = payload.iter().map(|b| format!("{:02x}", b)).collect();
+        let _ = std::fs::write(&p, &hex);
+        let old_m: String = current.iter().skip(5).take(4).map(|b| format!("{:02x}", b)).collect();
+        let new_m: String = payload.iter().skip(5).take(4).map(|b| format!("{:02x}", b)).collect();
+        if same_magic {
+            eprintln!("[beacon] handshake learned from live traffic (magic {})", new_m);
+        } else {
+            eprintln!(
+                "[beacon] handshake magic changed {} -> {} — DBD likely patched; probe template auto-updated",
+                old_m, new_m
+            );
+        }
+    }
 }
 
 // Local UDP ports used by our own probe sockets (with an expiry), so the traffic sniffer can ignore
@@ -91,7 +172,8 @@ pub fn is_beacon_local_port(port: u16) -> bool {
 
 /// Send the UE handshake to ip:port on a connected UDP socket and classify the result.
 pub async fn probe_handshake(ip: &str, port: u16, timeout_ms: u64) -> ProbeReport {
-    let hs = handshake();
+    let hs = active_handshake();
+    let magic = active_magic();
     let mut report = ProbeReport { ip: ip.to_string(), port, outcome: Outcome::Error, magic: false };
 
     let sock = match UdpSocket::bind("0.0.0.0:0").await {
@@ -112,7 +194,7 @@ pub async fn probe_handshake(ip: &str, port: u16, timeout_ms: u64) -> ProbeRepor
     match timeout(Duration::from_millis(timeout_ms), sock.recv(&mut buf)).await {
         Ok(Ok(n)) => {
             report.outcome = Outcome::Replied;
-            report.magic = n >= 9 && buf[5..9] == MAGIC;
+            report.magic = n >= 9 && buf[5..9] == magic;
         }
         Ok(Err(e)) if e.kind() == ErrorKind::ConnectionRefused => {
             report.outcome = Outcome::PortUnreachable;
