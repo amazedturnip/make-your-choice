@@ -1,9 +1,9 @@
 version: v3.0
 notes:
-  - "Hard Region Lock (firewall): optionally block every region you didn't pick so DBD can't fall back to N. Virginia. EAC/matchmaking are left alone, so the game still launches."
+  - "Hard Region Lock (firewall): optionally block every region you didn't pick so DBD can't fall back to N. Virginia."
   - "Live server status: real online/offline for the unstable servers (Ohio, Canada, London), shown as a check/warning in the list."
   - "System tray: minimizes to a single icon with a green/red status bubble; hover shows status and queue time."
   - "Notifications when your preferred server comes online."
-  - "Configurable status poll interval (default 60s)."
+  - "Configurable status poll interval."
   - "Your region selection is remembered across launches."
-  - "Note: built for Windows; a Linux version is in development."
+  - "Backend consistency when resetting to default, applying with no boxes selected, or changing firewall/merge settings."
