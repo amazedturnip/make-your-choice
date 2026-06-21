@@ -91,9 +91,14 @@ struct AppState {
     server_registry: Arc<server_registry::ServerRegistry>,
     connected_to_label: Label,
     connection_dot: Label,
-    // AWS region code -> online(true)/offline(false), from Dead by Queue /regions (the only source
-    // that reflects DBD fleet state). A live sniffer connection can override a region to online.
+    // RESOLVED status per AWS region code (read by the tray + latency list). Resolved each poll from
+    // three inputs in priority order: recent live connection > active beacon > Dead by Queue.
     dbq_online: RefCell<HashMap<String, bool>>,
+    dbq_raw: RefCell<HashMap<String, bool>>,           // DBQ's own /regions view (fallback input)
+    beacon_state: RefCell<HashMap<String, i32>>,       // 1=online, 2=offline, else unknown
+    status_source: RefCell<HashMap<String, String>>,   // "live" | "beacon" | "dbq"
+    // UTC instant of the last real sniffer connection per region; "live" counts only while recent.
+    last_connection: Arc<Mutex<HashMap<String, std::time::Instant>>>,
     // Last queue-time text for the preferred region, shown in the tray tooltip.
     last_queue_text: RefCell<String>,
     // System tray controller (None if the tray couldn't be started).
@@ -807,6 +812,9 @@ fn build_ui(app: &Application) {
     let last_seen_clone = last_seen.clone();
     let registry_clone = server_registry.clone();
     let harvested: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+    // Shared with the status resolver: when we last actually connected to each region.
+    let last_connection: Arc<Mutex<HashMap<String, std::time::Instant>>> = Arc::new(Mutex::new(HashMap::new()));
+    let last_connection_sniff = last_connection.clone();
 
     let sniffer = Arc::new(TrafficSniffer::new(move |remote_ip, _port, local_port| {
         // Ignore the beacon's own probe packets (and the server replies to them) so a probe never
@@ -829,6 +837,7 @@ fn build_ui(app: &Application) {
         let last_seen_update = last_seen_clone.clone();
         let registry = registry_clone.clone();
         let harvested = harvested.clone();
+        let last_conn = last_connection_sniff.clone();
         let port = _port;
 
         runtime.spawn(async move {
@@ -838,6 +847,10 @@ fn build_ui(app: &Application) {
             }
             // Learn this server (and harvest the instance's full port set once) into the pool.
             if let Some(code) = aws.get_region_code(&ip_string).await {
+                // Record the live connection time (authoritative "online" while recent).
+                if let Ok(mut lc) = last_conn.lock() {
+                    lc.insert(code.clone(), std::time::Instant::now());
+                }
                 registry.record(&code, &ip_string, port);
                 let first_seen = harvested.lock().map(|mut h| h.insert(ip_string.clone())).unwrap_or(false);
                 if first_seen {
@@ -883,6 +896,10 @@ fn build_ui(app: &Application) {
         connected_to_label: connected_value,
         connection_dot: connection_dot,
         dbq_online: RefCell::new(HashMap::new()),
+        dbq_raw: RefCell::new(HashMap::new()),
+        beacon_state: RefCell::new(HashMap::new()),
+        status_source: RefCell::new(HashMap::new()),
+        last_connection,
         last_queue_text: RefCell::new(String::new()),
         tray: RefCell::new(None),
         prev_pref_region: RefCell::new(None),
@@ -2694,15 +2711,15 @@ fn start_dbq_timer(app_state: Rc<AppState>) {
                 .await
                 .unwrap_or_default();
             if !status.is_empty() {
-                let mut map = app_state.dbq_online.borrow_mut();
+                let mut raw = app_state.dbq_raw.borrow_mut();
                 for (k, v) in status {
-                    map.insert(k, v);
+                    raw.insert(k, v); // DBQ's own view (fallback input)
                 }
             }
 
             // Active beacon: probe the known server pool for each unstable region. A confirmed UE
-            // handshake challenge flips that region online in real time (going around DBQ's lag).
-            // "No reply" is inconclusive, so we never force offline here — DBQ stays the down source.
+            // handshake challenge => online; a non-trivial pool that is entirely unreachable => offline
+            // (faster/more accurate than DBQ's lag). Otherwise unknown -> defer to DBQ.
             {
                 let mut codes: Vec<String> = Vec::new();
                 for (name, info) in app_state.regions.iter() {
@@ -2718,22 +2735,41 @@ fn start_dbq_timer(app_state: Rc<AppState>) {
                 for code in codes {
                     let targets = app_state.server_registry.candidates(&code, 64);
                     if targets.is_empty() {
+                        app_state.beacon_state.borrow_mut().insert(code.clone(), 0); // unknown
                         continue;
                     }
+                    let distinct_ips: usize = {
+                        let mut s = std::collections::HashSet::new();
+                        for (ip, _) in &targets {
+                            s.insert(ip.clone());
+                        }
+                        s.len()
+                    };
+                    let total = targets.len();
                     let summary = runtime
                         .spawn(async move { live_probe::probe_batch(targets, 1000, 32).await })
                         .await
                         .ok();
-                    if let Some(s) = summary {
+                    let state = if let Some(s) = summary {
                         if s.any_live {
-                            app_state.dbq_online.borrow_mut().insert(code.clone(), true);
                             if let Some((ip, port)) = s.first_live {
                                 app_state.server_registry.record(&code, &ip, port);
                             }
+                            1 // online
+                        } else if total >= 8 && distinct_ips >= 2 && s.replied == 0 && s.port_unreach == 0 {
+                            2 // offline: non-trivial pool entirely unreachable
+                        } else {
+                            0 // unknown
                         }
-                    }
+                    } else {
+                        0
+                    };
+                    app_state.beacon_state.borrow_mut().insert(code.clone(), state);
                 }
             }
+
+            // Resolve displayed status: recent live connection > beacon > DBQ.
+            resolve_statuses(&app_state);
 
             let Some(pref) = preferred_region(&app_state) else {
                 if let Some(t) = app_state.tray.borrow().as_ref() {
@@ -2769,8 +2805,15 @@ fn start_dbq_timer(app_state: Rc<AppState>) {
                 Some(false) => "OFFLINE",
                 None => "status unknown",
             };
+            // Show which source produced this status (beacon = real-time active probe).
+            let src = code
+                .as_ref()
+                .filter(|_| online.is_some())
+                .and_then(|c| app_state.status_source.borrow().get(c).cloned())
+                .map(|s| format!(" [{}]", s))
+                .unwrap_or_default();
             if let Some(t) = app_state.tray.borrow().as_ref() {
-                t.update(online, format!("{}: {} | {}", short, state_str, queue));
+                t.update(online, format!("{}: {} | {}{}", short, state_str, queue, src));
             }
 
             // Notify on an offline -> online transition for the same preferred region.
@@ -2791,6 +2834,63 @@ fn start_dbq_timer(app_state: Rc<AppState>) {
         glib::ControlFlow::Continue
     });
     *app_state.dbq_source.borrow_mut() = Some(id);
+}
+
+// Resolve each region's displayed status from three inputs, in priority order:
+// recent live connection > active beacon (online/offline) > Dead by Queue. Writes the result into
+// dbq_online/status_source, which the tray and latency list read.
+fn resolve_statuses(app_state: &Rc<AppState>) {
+    const LIVE_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
+    let now = std::time::Instant::now();
+
+    let mut codes: HashSet<String> = HashSet::new();
+    for k in app_state.dbq_raw.borrow().keys() {
+        codes.insert(k.clone());
+    }
+    for (name, _info) in app_state.regions.iter() {
+        if let Some(c) = aws_code_for_region(&app_state.regions, name) {
+            codes.insert(c);
+        }
+    }
+
+    let last_conn = app_state.last_connection.lock().ok();
+    let beacon = app_state.beacon_state.borrow();
+    let raw = app_state.dbq_raw.borrow();
+    let mut online_map = app_state.dbq_online.borrow_mut();
+    let mut src_map = app_state.status_source.borrow_mut();
+
+    for code in codes {
+        let recent_live = last_conn
+            .as_ref()
+            .and_then(|m| m.get(&code))
+            .map(|t| now.duration_since(*t) < LIVE_WINDOW)
+            .unwrap_or(false);
+        if recent_live {
+            online_map.insert(code.clone(), true);
+            src_map.insert(code.clone(), "live".to_string());
+            continue;
+        }
+        match beacon.get(&code).copied().unwrap_or(0) {
+            1 => {
+                online_map.insert(code.clone(), true);
+                src_map.insert(code.clone(), "beacon".to_string());
+                continue;
+            }
+            2 => {
+                online_map.insert(code.clone(), false);
+                src_map.insert(code.clone(), "beacon".to_string());
+                continue;
+            }
+            _ => {}
+        }
+        if let Some(v) = raw.get(&code).copied() {
+            online_map.insert(code.clone(), v);
+            src_map.insert(code.clone(), "dbq".to_string());
+        } else {
+            online_map.remove(&code);
+            src_map.remove(&code);
+        }
+    }
 }
 
 fn is_region_blocked_by_hosts(
