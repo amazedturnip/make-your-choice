@@ -783,6 +783,9 @@ namespace MakeYourChoice
                 var regionName = await Task.Run(() => _awsService.GetRegionForIp(ip));
 
                 _lastDetectedRegion = regionName;
+                // Live ground truth: we actually connected to a server in this region, so it's
+                // online right now — override DBQ's lagged data immediately.
+                MarkRegionOnlineFromConnection(regionName);
                 UpdateUi(regionName);
             }
             catch { /* Ignore if UI is gone */ }
@@ -2045,11 +2048,9 @@ namespace MakeYourChoice
                 .ToList();
             if (selectedItems.Count == 0)
             {
-                MessageBox.Show(
-                    "Please select at least one server to allow.",
-                    "No Server Selected",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Warning);
+                // No bubbles ticked -> clear all restrictions (host entries + firewall lock),
+                // same as Revert to Default.
+                await ClearAllRestrictionsAsync(true);
                 return;
             }
 
@@ -2194,6 +2195,125 @@ namespace MakeYourChoice
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
             }
+        }
+
+        private static void FlushDns()
+        {
+            try
+            {
+                using var p = Process.Start(new ProcessStartInfo("ipconfig", "/flushdns")
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false
+                });
+                p?.WaitForExit();
+            }
+            catch { /* ignore */ }
+        }
+
+        // Clear all Make Your Choice restrictions: empty the hosts section and remove the firewall
+        // lock. Used by "Apply Selection" with nothing ticked (same effect as Revert to Default).
+        private async Task ClearAllRestrictionsAsync(bool showMessage)
+        {
+            try
+            {
+                try { File.Copy(HostsPath, HostsPath + ".bak", true); } catch { /* ignore backup */ }
+                WriteWrappedHostsSection(string.Empty);
+                FlushDns();
+                await Task.Run(() => FirewallManager.RemoveLock());
+                SaveSettings();
+                if (showMessage)
+                    MessageBox.Show(
+                        "All Make Your Choice restrictions were cleared (host entries and any firewall lock removed).\n\nPlease restart the game for changes to take effect.",
+                        "Restrictions cleared",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information);
+            }
+            catch (UnauthorizedAccessException)
+            {
+                MessageBox.Show("Please run as Administrator to modify the hosts file.",
+                    "Permission Denied", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        // Re-apply the current Gatekeep selection silently (no dialogs). Called when Merge or the
+        // hard-lock toggle changes in settings, so the hosts entries + firewall always match the UI
+        // without having to click Apply or Revert.
+        private async Task ReapplyGatekeepSilentlyAsync()
+        {
+            var checkedItems = _lv.CheckedItems.Cast<ListViewItem>().Where(i => i.Tag is string).ToList();
+            if (checkedItems.Count == 0)
+            {
+                await ClearAllRestrictionsAsync(false);
+                return;
+            }
+
+            var selectedRegions = checkedItems.Select(i => (string)i.Tag).ToList();
+            bool anyStable = selectedRegions.Any(k => _regions[k].Stable);
+            var allowedSet = new HashSet<string>(selectedRegions);
+            if (_mergeUnstable && !anyStable)
+            {
+                foreach (var region in selectedRegions.ToList())
+                {
+                    if (_regions[region].Stable) continue;
+                    var group = GetGroupName(region);
+                    var alt = _regions.FirstOrDefault(kv => GetGroupName(kv.Key) == group && kv.Value.Stable);
+                    if (!string.IsNullOrEmpty(alt.Key)) allowedSet.Add(alt.Key);
+                }
+            }
+
+            try
+            {
+                var sb = new StringBuilder();
+                sb.AppendLine("# Edited by Make Your Choice (DbD Server Selector)");
+                sb.AppendLine("# Unselected servers are blocked (Gatekeep Mode); selected servers are commented out.");
+                sb.AppendLine($"# Need help? Discord: {DiscordUrl}");
+                sb.AppendLine();
+                foreach (ListViewItem item in _lv.Items)
+                {
+                    if (!(item.Tag is string regionKey)) continue;
+                    bool allow = allowedSet.Contains(regionKey);
+                    foreach (var h in _regions[regionKey].Hosts)
+                    {
+                        bool isPing = h.Contains("ping", StringComparison.OrdinalIgnoreCase);
+                        bool include = _blockMode == BlockMode.Both
+                                       || (_blockMode == BlockMode.OnlyPing && isPing)
+                                       || (_blockMode == BlockMode.OnlyService && !isPing);
+                        if (!include) continue;
+                        sb.AppendLine($"{(allow ? "#" : "0.0.0.0".PadRight(9))} {h}");
+                    }
+                    sb.AppendLine();
+                }
+                foreach (var kv in _blockedRegions)
+                {
+                    foreach (var h in kv.Value.Hosts) sb.AppendLine($"0.0.0.0 {h}");
+                    sb.AppendLine();
+                }
+                WriteWrappedHostsSection(sb.ToString());
+                FlushDns();
+                SaveSettings();
+                await ReconcileHardLockAsync(allowedSet); // applies or removes the firewall to match
+            }
+            catch { /* best-effort; manual Apply surfaces any errors */ }
+        }
+
+        // True if the hosts file currently has an active Make Your Choice region section.
+        private bool IsHostsSectionActive()
+        {
+            try
+            {
+                var text = File.ReadAllText(HostsPath);
+                int first = text.IndexOf(SectionMarker, StringComparison.Ordinal);
+                int last = first >= 0 ? text.IndexOf(SectionMarker, first + SectionMarker.Length, StringComparison.Ordinal) : -1;
+                if (first < 0 || last < 0) return false;
+                var inner = text.Substring(first + SectionMarker.Length, last - first - SectionMarker.Length);
+                return inner.Contains("amazonaws") || inner.Contains("api.aws");
+            }
+            catch { return false; }
         }
 
         private void BtnRevert_Click(object sender, EventArgs e)
@@ -2789,13 +2909,11 @@ namespace MakeYourChoice
                     else if (rbPing.Checked)  _blockMode = BlockMode.OnlyPing;
                     else                      _blockMode = BlockMode.OnlyService;
                 }
-                _mergeUnstable = cbMergeUnstable.Checked;
-                // Hard region lock: two-way. Turning it OFF removes any active firewall rules now;
-                // turning it ON takes effect the next time you click "Apply Selection".
+                bool mergeChanged = _mergeUnstable != cbMergeUnstable.Checked;
+                bool hardLockChanged = _useHardLock != cbHardLock.Checked;
                 bool hardLockTurnedOff = _useHardLock && !cbHardLock.Checked;
+                _mergeUnstable = cbMergeUnstable.Checked;
                 _useHardLock = cbHardLock.Checked;
-                if (hardLockTurnedOff)
-                    FirewallManager.RemoveLock();
                 _gamePath = gamePathText;
                 _darkMode = cbDarkMode.Checked;
                 _minimizeToTray = cbMinimizeTray.Checked;
@@ -2806,6 +2924,15 @@ namespace MakeYourChoice
                 _startWithWindows = cbStartup.Checked;
                 SaveSettings();
                 if (startupChanged) SetAutoStart(_startWithWindows);
+
+                // Keep the backend in sync with the UI on demand: if a Gatekeep selection is
+                // already applied and Merge or the hard lock changed, re-apply now so the hosts
+                // entries and firewall rules match — no need to click Apply or Revert to Default.
+                if (_applyMode == ApplyMode.Gatekeep && (mergeChanged || hardLockChanged) && IsHostsSectionActive())
+                    _ = ReapplyGatekeepSilentlyAsync();
+                else if (hardLockTurnedOff)
+                    FirewallManager.RemoveLock();
+
                 ApplyTheme();
                 UpdateRegionListViewAppearance();
                 

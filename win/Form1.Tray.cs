@@ -21,7 +21,6 @@ namespace MakeYourChoice
         private Bitmap _appIconBmp;
         private ContextMenuStrip _trayMenu;
         private Timer _dbqTimer;
-        private Timer _beaconTimer;
         private bool _minimizeBalloonShown;
         private bool _exiting;
         // For offline -> online notifications: the preferred region and its last seen online state.
@@ -62,52 +61,46 @@ namespace MakeYourChoice
         {
             int ms = Math.Max(5, _pollIntervalSeconds) * 1000;
 
-            // Slow poll: fills the fallback online map for non-selected regions and the preferred
-            // region's queue-time text. The fast beacon timer owns the live status + notifications.
+            // Single poll: refresh real online/offline + queue from Dead by Queue, then update the
+            // tray. (The old GameLift-beacon probe was removed: the beacon can't read DBD fleet
+            // state — UDP 443 never echoes, and UDP 7770 echoes for every region regardless of
+            // whether DBD has servers there — so it always reported the selected region as down.)
             _dbqTimer = new Timer { Interval = ms };
-            _dbqTimer.Tick += async (_, __) => await RefreshDbqAsync();
+            _dbqTimer.Tick += async (_, __) => await RefreshStatusAsync();
             _dbqTimer.Start();
-            _ = RefreshDbqAsync(); // immediate first fetch
-
-            // Fast poll: probe ONLY the selected region's GameLift beacon for real-time up/down.
-            _beaconTimer = new Timer { Interval = ms };
-            _beaconTimer.Tick += async (_, __) => await UpdateTrayFromBeaconAsync();
-            _beaconTimer.Start();
-            _ = UpdateTrayFromBeaconAsync(); // immediate first probe
+            _ = RefreshStatusAsync(); // immediate first fetch
         }
 
-        // Re-apply the configured poll interval to both timers (call after the option changes).
+        // Re-apply the configured poll interval (call after the option changes).
         private void ApplyPollInterval()
         {
             int ms = Math.Max(5, _pollIntervalSeconds) * 1000;
             if (_dbqTimer != null) _dbqTimer.Interval = ms;
-            if (_beaconTimer != null) _beaconTimer.Interval = ms;
         }
 
-        // Slow Dead by Queue poll — caches data only; does not touch the tray (the beacon owns it).
-        private async System.Threading.Tasks.Task RefreshDbqAsync()
+        // Real-time override: the moment we actually connect to a server in a region (seen by the
+        // traffic sniffer), that region is definitively ONLINE — more reliable and immediate than
+        // any ping or DBQ's lagged data. Called from OnTrafficDetected.
+        public void MarkRegionOnlineFromConnection(string regionName)
+        {
+            if (string.IsNullOrEmpty(regionName)) return;
+            var code = AwsCodeForRegion(regionName);
+            if (code != null) _dbqOnline[code] = true;
+        }
+
+        // Poll Dead by Queue for real online/offline status + queue time, and update the tray.
+        private async System.Threading.Tasks.Task RefreshStatusAsync()
         {
             if (_exiting || IsDisposed || _tray == null) return;
 
             var status = await DbqClient.GetRegionStatusAsync();
             if (status.Count > 0)
             {
+                // DBQ is the baseline; a live sniffer connection can still override a region to
+                // online afterward via MarkRegionOnlineFromConnection.
                 foreach (var kv in status) _dbqOnline[kv.Key] = kv.Value;
             }
 
-            var preferred = GetPreferredRegionKey();
-            var code = preferred != null ? AwsCodeForRegion(preferred) : null;
-            if (!string.IsNullOrEmpty(code))
-            {
-                var (queueText, _) = await DbqClient.GetQueueAsync(code);
-                _lastQueueText = queueText;
-            }
-        }
-
-        // Fast live status: probe the selected region's GameLift beacon directly (beacon-primary),
-        // falling back to the cached Dead by Queue map only when the probe is inconclusive.
-        private async System.Threading.Tasks.Task UpdateTrayFromBeaconAsync()
-        {
             if (_exiting || IsDisposed || _tray == null) return;
 
             var preferred = GetPreferredRegionKey();
@@ -121,20 +114,7 @@ namespace MakeYourChoice
             }
 
             var code = AwsCodeForRegion(preferred);
-            var hosts = _regions.TryGetValue(preferred, out var info) ? info.Hosts : null;
-            var pingHost = hosts != null && hosts.Length > 1 ? hosts[1]
-                         : hosts != null && hosts.Length > 0 ? hosts[0] : null;
-
-            // Beacon is primary; fall back to the cached Dead by Queue map when inconclusive (null).
-            bool? online = await GameLiftBeacon.IsFleetOnlineAsync(pingHost);
-            if (online == null && code != null && _dbqOnline.TryGetValue(code, out var cached))
-                online = cached;
-
-            // Feed the live result back into the map so the latency list ✓/⚠ tracks it too.
-            if (online != null && code != null)
-                _dbqOnline[code] = online.Value;
-
-            if (_exiting || IsDisposed || _tray == null) return;
+            bool? online = (code != null && _dbqOnline.TryGetValue(code, out var on)) ? on : (bool?)null;
 
             var shortName = preferred.Contains("(")
                 ? preferred.Substring(preferred.IndexOf('(') + 1).TrimEnd(')')
@@ -143,6 +123,15 @@ namespace MakeYourChoice
             Color bubble = online == true ? Color.LimeGreen : online == false ? Color.Red : Color.Gray;
             string state = online == true ? "ONLINE" : online == false ? "OFFLINE" : "status unknown";
             SetTrayIcon(MakeStatusIcon(bubble));
+
+            string queueText = "";
+            if (!string.IsNullOrEmpty(code))
+            {
+                var (qt, _) = await DbqClient.GetQueueAsync(code);
+                queueText = qt;
+                _lastQueueText = qt;
+            }
+            if (_exiting || IsDisposed || _tray == null) return;
 
             // Notify on an offline -> online transition for the same preferred region.
             if (_notifyServerOnline
@@ -156,7 +145,7 @@ namespace MakeYourChoice
             _prevPreferredRegion = preferred;
             _prevPreferredOnline = online;
 
-            var queue = string.IsNullOrEmpty(_lastQueueText) ? "" : "  —  " + _lastQueueText;
+            var queue = string.IsNullOrEmpty(queueText) ? "" : "  -  " + queueText;
             _tray.Text = Trunc($"{shortName}: {state}{queue}");
         }
 
@@ -272,7 +261,6 @@ namespace MakeYourChoice
         {
             _exiting = true;
             try { _dbqTimer?.Stop(); _dbqTimer?.Dispose(); } catch { }
-            try { _beaconTimer?.Stop(); _beaconTimer?.Dispose(); } catch { }
             if (_tray != null) { _tray.Visible = false; _tray.Dispose(); _tray = null; }
             if (_trayHandle != IntPtr.Zero) { DestroyIcon(_trayHandle); _trayHandle = IntPtr.Zero; }
             _appIconBmp?.Dispose();
