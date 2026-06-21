@@ -2738,31 +2738,20 @@ fn start_dbq_timer(app_state: Rc<AppState>) {
                         app_state.beacon_state.borrow_mut().insert(code.clone(), 0); // unknown
                         continue;
                     }
-                    let distinct_ips: usize = {
-                        let mut s = std::collections::HashSet::new();
-                        for (ip, _) in &targets {
-                            s.insert(ip.clone());
-                        }
-                        s.len()
-                    };
-                    let total = targets.len();
                     let summary = runtime
                         .spawn(async move { live_probe::probe_batch(targets, 1000, 32).await })
                         .await
                         .ok();
-                    let state = if let Some(s) = summary {
-                        if s.any_live {
+                    // A probe can only confirm ONLINE. No reply is inconclusive (pool churned / region
+                    // scaled down / stale handshake) -> unknown, defer to DBQ. Never assert OFFLINE.
+                    let state = match summary {
+                        Some(s) if s.any_live => {
                             if let Some((ip, port)) = s.first_live {
                                 app_state.server_registry.record(&code, &ip, port);
                             }
                             1 // online
-                        } else if total >= 8 && distinct_ips >= 2 && s.replied == 0 && s.port_unreach == 0 {
-                            2 // offline: non-trivial pool entirely unreachable
-                        } else {
-                            0 // unknown
                         }
-                    } else {
-                        0
+                        _ => 0, // unknown
                     };
                     app_state.beacon_state.borrow_mut().insert(code.clone(), state);
                 }
@@ -2870,19 +2859,12 @@ fn resolve_statuses(app_state: &Rc<AppState>) {
             src_map.insert(code.clone(), "live".to_string());
             continue;
         }
-        match beacon.get(&code).copied().unwrap_or(0) {
-            1 => {
-                online_map.insert(code.clone(), true);
-                src_map.insert(code.clone(), "beacon".to_string());
-                continue;
-            }
-            2 => {
-                online_map.insert(code.clone(), false);
-                src_map.insert(code.clone(), "beacon".to_string());
-                continue;
-            }
-            _ => {}
+        if beacon.get(&code).copied().unwrap_or(0) == 1 {
+            online_map.insert(code.clone(), true);
+            src_map.insert(code.clone(), "beacon".to_string());
+            continue;
         }
+        // No positive live/beacon signal -> defer entirely to DBQ (online or offline).
         if let Some(v) = raw.get(&code).copied() {
             online_map.insert(code.clone(), v);
             src_map.insert(code.clone(), "dbq".to_string());
