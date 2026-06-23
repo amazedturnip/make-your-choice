@@ -167,6 +167,9 @@ namespace MakeYourChoice
         private bool _minimizeToTray = true;
         // Notify (tray balloon) when the preferred server transitions offline -> online.
         private bool _notifyServerOnline = false;
+        // Live server scanning: actively probe known game servers (the beacon) to detect real-time
+        // status. When off, the app sends no probe traffic and relies on Dead by Queue + connections.
+        private bool _liveServerScanning = true;
         // How often (seconds) the GameLift beacon probe and the Dead by Queue poll run.
         private int _pollIntervalSeconds = 30;
         // Start automatically at Windows logon (via a scheduled task so the elevated app launches
@@ -224,6 +227,7 @@ namespace MakeYourChoice
             public bool UseHardRegionLock { get; set; }
             public bool MinimizeToTray { get; set; } = true;
             public bool NotifyServerOnline { get; set; }
+            public bool LiveServerScanning { get; set; } = true;
             public int PollIntervalSeconds { get; set; } = 30;
             public bool StartWithWindows { get; set; }
             public List<string> SelectedRegions { get; set; }
@@ -253,6 +257,7 @@ namespace MakeYourChoice
                     _useHardLock = settings.UseHardRegionLock;
                     _minimizeToTray = settings.MinimizeToTray;
                     _notifyServerOnline = settings.NotifyServerOnline;
+                    _liveServerScanning = settings.LiveServerScanning;
                     _pollIntervalSeconds = settings.PollIntervalSeconds >= 5 ? settings.PollIntervalSeconds : 60;
                     _startWithWindows = settings.StartWithWindows;
                     _savedSelection = settings.SelectedRegions ?? new List<string>();
@@ -287,6 +292,7 @@ namespace MakeYourChoice
                     UseHardRegionLock = _useHardLock,
                     MinimizeToTray = _minimizeToTray,
                     NotifyServerOnline = _notifyServerOnline,
+                    LiveServerScanning = _liveServerScanning,
                     PollIntervalSeconds = _pollIntervalSeconds,
                     StartWithWindows = _startWithWindows,
                     SelectedRegions = GetCheckedRegionKeys(),
@@ -829,9 +835,10 @@ namespace MakeYourChoice
 
                         // Harvest the whole instance once: each GameLift box hosts several server
                         // ports, so one connection can seed ~5 pool endpoints instead of 1.
+                        // (Active probing — only when live scanning is enabled.)
                         bool firstSeen;
                         lock (_harvestedIps) firstSeen = _harvestedIps.Add(ip);
-                        if (firstSeen)
+                        if (firstSeen && _liveServerScanning)
                         {
                             _ = Task.Run(async () =>
                             {
@@ -2750,6 +2757,15 @@ namespace MakeYourChoice
             };
             var toolTipStartup = new ToolTip();
             toolTipStartup.SetToolTip(cbStartup, "Launch Make Your Choice automatically when you log in (as a scheduled task, so it starts elevated without a UAC prompt).");
+            var cbLiveScan = new CheckBox
+            {
+                Text = "Live server scanning",
+                AutoSize = true,
+                Checked = _liveServerScanning,
+                Margin = new Padding(3, 3, 3, 3)
+            };
+            var toolTipLiveScan = new ToolTip();
+            toolTipLiveScan.SetToolTip(cbLiveScan, "Actively ping known DBD game servers to detect in real time when an unstable region is really online (faster than Dead by Queue). Turn off to send no probe traffic and rely only on Dead by Queue plus servers you actually connect to.");
             var lblPoll = new Label
             {
                 Text = "Server status poll interval (sec):",
@@ -2799,11 +2815,12 @@ namespace MakeYourChoice
                 AutoSize = true,
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 ColumnCount = 1,
-                RowCount = 3
+                RowCount = 4
             };
             tlpApp.Controls.Add(cbMinimizeTray, 0, 0);
             tlpApp.Controls.Add(cbNotifyOnline, 0, 1);
             tlpApp.Controls.Add(cbStartup, 0, 2);
+            tlpApp.Controls.Add(cbLiveScan, 0, 3);
             appPanel.Controls.Add(tlpApp);
 
             // ── Game folder ────────────────────────────────────────────
@@ -2916,6 +2933,7 @@ namespace MakeYourChoice
                 cbMinimizeTray.Checked = true;
                 cbNotifyOnline.Checked = false;
                 cbStartup.Checked = false;
+                cbLiveScan.Checked = true;
                 nudPollInterval.Value = 30;
             };
             buttonPanel.Controls.Add(btnOk);
@@ -2969,6 +2987,7 @@ namespace MakeYourChoice
                 _darkMode = cbDarkMode.Checked;
                 _minimizeToTray = cbMinimizeTray.Checked;
                 _notifyServerOnline = cbNotifyOnline.Checked;
+                _liveServerScanning = cbLiveScan.Checked;
                 _pollIntervalSeconds = (int)nudPollInterval.Value;
                 ApplyPollInterval();
                 bool startupChanged = _startWithWindows != cbStartup.Checked;

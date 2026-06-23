@@ -124,6 +124,9 @@ namespace MakeYourChoice
         private async System.Threading.Tasks.Task RunActiveBeaconAsync()
         {
             if (!ExperimentActiveBeacon) return;
+            // User toggle: when live scanning is off, send no probe traffic and clear any beacon
+            // verdicts so status falls back to live connections + Dead by Queue.
+            if (!_liveServerScanning) { _beaconResult.Clear(); return; }
             if (_regions == null) return;
 
             // The region shown in the tray gets the extra port-sweep effort.
