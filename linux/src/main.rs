@@ -815,6 +815,7 @@ fn build_ui(app: &Application) {
     // Shared with the status resolver: when we last actually connected to each region.
     let last_connection: Arc<Mutex<HashMap<String, std::time::Instant>>> = Arc::new(Mutex::new(HashMap::new()));
     let last_connection_sniff = last_connection.clone();
+    let settings_sniff = settings.clone(); // to gate the active port-harvest on the live-scan toggle
 
     let sniffer = Arc::new(TrafficSniffer::new(move |remote_ip, _port, local_port| {
         // Ignore the beacon's own probe packets (and the server replies to them) so a probe never
@@ -838,6 +839,7 @@ fn build_ui(app: &Application) {
         let registry = registry_clone.clone();
         let harvested = harvested.clone();
         let last_conn = last_connection_sniff.clone();
+        let settings_h = settings_sniff.clone();
         let port = _port;
 
         runtime.spawn(async move {
@@ -852,8 +854,11 @@ fn build_ui(app: &Application) {
                     lc.insert(code.clone(), std::time::Instant::now());
                 }
                 registry.record(&code, &ip_string, port);
+                // Harvest the instance's full port set once — active probing, only when live
+                // scanning is enabled.
                 let first_seen = harvested.lock().map(|mut h| h.insert(ip_string.clone())).unwrap_or(false);
-                if first_seen {
+                let scanning = settings_h.lock().map(|s| s.live_server_scanning).unwrap_or(true);
+                if first_seen && scanning {
                     let ports = live_probe::harvest_live_ports(&ip_string).await;
                     for p in ports {
                         registry.record(&code, &ip_string, p);
@@ -2330,6 +2335,12 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
         "Launch Make Your Choice automatically at login (adds an entry to ~/.config/autostart).",
     ));
 
+    let live_scan_check = CheckButton::with_label("Live server scanning");
+    live_scan_check.set_active(settings.live_server_scanning);
+    live_scan_check.set_tooltip_text(Some(
+        "Actively ping known DBD game servers to detect in real time when an unstable region is really online (faster than Dead by Queue). Turn off to send no probe traffic and rely only on Dead by Queue plus servers you actually connect to.",
+    ));
+
     let poll_label = Label::new(Some("Server status poll interval (seconds):"));
     poll_label.set_halign(gtk4::Align::Start);
     let poll_spin = SpinButton::with_range(5.0, 600.0, 5.0);
@@ -2357,6 +2368,7 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
     settings_box.append(&minimize_tray_check);
     settings_box.append(&notify_check);
     settings_box.append(&autostart_check);
+    settings_box.append(&live_scan_check);
     settings_box.append(&Separator::new(Orientation::Horizontal));
 
     // Game folder
@@ -2455,6 +2467,7 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
             settings.use_hard_lock = hard_lock_check.is_active();
             settings.minimize_to_tray = minimize_tray_check.is_active();
             settings.notify_server_online = notify_check.is_active();
+            settings.live_server_scanning = live_scan_check.is_active();
             settings.poll_interval_seconds = poll_spin.value() as u64;
             let autostart_changed = settings.auto_start != autostart_check.is_active();
             settings.auto_start = autostart_check.is_active();
@@ -2509,6 +2522,7 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
             settings.use_hard_lock = false;
             settings.minimize_to_tray = true;
             settings.notify_server_online = false;
+            settings.live_server_scanning = true;
             settings.poll_interval_seconds = 60;
             let autostart_was_on = settings.auto_start;
             settings.auto_start = false;
@@ -2536,6 +2550,7 @@ fn show_settings_dialog(app_state: &Rc<AppState>, parent: &ApplicationWindow) {
             minimize_tray_check.set_active(true);
             notify_check.set_active(false);
             autostart_check.set_active(false);
+            live_scan_check.set_active(true);
             poll_spin.set_value(30.0);
 
             // Refresh the warning symbols in the list view
@@ -2718,9 +2733,12 @@ fn start_dbq_timer(app_state: Rc<AppState>) {
             }
 
             // Active beacon: probe the known server pool for each unstable region. A confirmed UE
-            // handshake challenge => online; a non-trivial pool that is entirely unreachable => offline
-            // (faster/more accurate than DBQ's lag). Otherwise unknown -> defer to DBQ.
-            {
+            // handshake challenge => online; otherwise unknown -> defer to DBQ. Skipped entirely when
+            // the user turns off live server scanning (no probe traffic), clearing any prior verdicts.
+            let live_scanning = app_state.settings.lock().map(|s| s.live_server_scanning).unwrap_or(true);
+            if !live_scanning {
+                app_state.beacon_state.borrow_mut().clear();
+            } else {
                 let mut codes: Vec<String> = Vec::new();
                 for (name, info) in app_state.regions.iter() {
                     if info.stable {
