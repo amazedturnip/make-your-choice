@@ -10,16 +10,23 @@
 use serde_json::Value;
 use std::collections::HashMap;
 
-const REGIONS_URL: &str = "https://api.deadbyqueue.com/regions";
-const QUEUE_URL: &str = "https://api.deadbyqueue.com/queuetime?region=";
+// Two DBQ mirrors. One sometimes glitches and reports EVERY region offline (even always-on stable
+// ones) — never real — while the other is correct. We query both, discard an all-offline response,
+// and use the sane/fresher one. api2 has been the more reliable mirror, so it's first.
+const REGIONS_URLS: [&str; 2] = [
+    "https://api2.deadbyqueue.com/regions",
+    "https://api.deadbyqueue.com/regions",
+];
+const QUEUE_URLS: [&str; 2] = [
+    "https://api2.deadbyqueue.com/queuetime?region=",
+    "https://api.deadbyqueue.com/queuetime?region=",
+];
 const UA: &str = "make-your-choice";
 
-/// AWS region code -> online(true)/offline(false), plus DBQ's own data-refresh time (unix UTC
-/// seconds, from "lastupdated2") so callers can judge freshness. Empty map + None on failure.
-pub async fn get_region_status() -> (HashMap<String, bool>, Option<i64>) {
+async fn fetch_regions(url: &str) -> (HashMap<String, bool>, Option<i64>) {
     let mut out = HashMap::new();
     let client = reqwest::Client::new();
-    let resp = match client.get(REGIONS_URL).header("User-Agent", UA).send().await {
+    let resp = match client.get(url).header("User-Agent", UA).send().await {
         Ok(r) => r,
         Err(_) => return (out, None),
     };
@@ -38,24 +45,42 @@ pub async fn get_region_status() -> (HashMap<String, bool>, Option<i64>) {
     (out, data_unix)
 }
 
+/// AWS region code -> online(true)/offline(false), plus DBQ's data-refresh time (unix). Queries both
+/// mirrors, ignores an all-offline (glitched) response, returns the sane/fresher one. Empty map if
+/// neither is sane, so the caller keeps its prior good values.
+pub async fn get_region_status() -> (HashMap<String, bool>, Option<i64>) {
+    let mut best: (HashMap<String, bool>, Option<i64>) = (HashMap::new(), None);
+    let mut have_sane = false;
+    for url in REGIONS_URLS.iter() {
+        let r = fetch_regions(url).await;
+        if r.0.is_empty() || !r.0.values().any(|&v| v) {
+            continue; // failed, or all-offline glitch
+        }
+        if !have_sane || r.1.unwrap_or(0) > best.1.unwrap_or(0) {
+            best = r;
+        }
+        have_sane = true;
+    }
+    best
+}
+
 /// Returns (raw text, killer queue minutes). minutes is 0 when under a minute, -1 if unknown.
+/// Tries both mirrors; returns the first that yields a real queue time.
 pub async fn get_queue(region_code: &str) -> (String, i64) {
     let client = reqwest::Client::new();
-    let url = format!("{}{}", QUEUE_URL, region_code);
-    match client.get(&url).header("User-Agent", UA).send().await {
-        Ok(resp) => match resp.text().await {
-            Ok(text) => {
+    for base in QUEUE_URLS.iter() {
+        let url = format!("{}{}", base, region_code);
+        if let Ok(resp) = client.get(&url).header("User-Agent", UA).send().await {
+            if let Ok(text) = resp.text().await {
                 let t = text.trim().to_string();
-                if t.is_empty() || t.starts_with("HTTP ") || !t.contains("Killer") {
-                    return (if t.is_empty() { "No data".to_string() } else { t }, -1);
+                if !t.is_empty() && !t.starts_with("HTTP ") && t.contains("Killer") {
+                    let minutes = parse_killer_minutes(&t);
+                    return (t, minutes);
                 }
-                let minutes = parse_killer_minutes(&t);
-                (t, minutes)
             }
-            Err(e) => (format!("Queue unavailable: {}", e), -1),
-        },
-        Err(e) => (format!("Queue unavailable: {}", e), -1),
+        }
     }
+    (String::new(), -1) // no mirror had a queue (e.g. region down) -> caller shows nothing
 }
 
 // Parse the minutes out of "Killer: 10m24s | ...". Returns 0 if "Killer" is present but no
