@@ -2876,7 +2876,10 @@ fn start_dbq_timer(app_state: Rc<AppState>) {
                 runtime
                     .spawn(async move { dbq::get_queue(&c).await })
                     .await
-                    .map(|(t, _)| t)
+                    .ok()
+                    // Only show an actual queue time; when a region is down DBQ returns a verbose
+                    // "no queue" paragraph (minutes = -1) — never put that in the tray.
+                    .and_then(|(t, min)| if min >= 0 { Some(t) } else { None })
                     .unwrap_or_default()
             } else {
                 String::new()
