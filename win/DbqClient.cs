@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net.Http;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -20,8 +21,20 @@ namespace MakeYourChoice
     /// </summary>
     public static class DbqClient
     {
-        private const string RegionsUrl = "https://api.deadbyqueue.com/regions";
-        private const string QueueUrl = "https://api.deadbyqueue.com/queuetime?region=";
+        // Two DBQ mirrors. They sometimes diverge: one can glitch and report EVERY region offline
+        // (even always-on stable ones), which is never real. We query both, throw out an all-offline
+        // (glitched) response, and use the sane/fresher one. api2 has been the more reliable mirror,
+        // so it's listed first.
+        private static readonly string[] RegionsUrls =
+        {
+            "https://api2.deadbyqueue.com/regions",
+            "https://api.deadbyqueue.com/regions",
+        };
+        private static readonly string[] QueueUrls =
+        {
+            "https://api2.deadbyqueue.com/queuetime?region=",
+            "https://api.deadbyqueue.com/queuetime?region=",
+        };
 
         private static readonly HttpClient _http = CreateClient();
 
@@ -39,11 +52,30 @@ namespace MakeYourChoice
         /// </summary>
         public static async Task<(Dictionary<string, bool> regions, long? dataUnix)> GetRegionStatusAsync()
         {
+            (Dictionary<string, bool> regions, long? dataUnix) best = (new Dictionary<string, bool>(), null);
+            bool haveSane = false;
+            foreach (var url in RegionsUrls)
+            {
+                var r = await FetchRegionsAsync(url);
+                if (r.regions.Count == 0) continue;                 // fetch/parse failed
+                bool sane = r.regions.Values.Any(v => v);           // all-offline = glitched mirror, ignore
+                if (!sane) continue;
+                // Among sane responses, keep the one with the fresher data timestamp.
+                if (!haveSane || (r.dataUnix ?? 0) > (best.dataUnix ?? 0)) best = r;
+                haveSane = true;
+            }
+            // If neither mirror was sane, return empty so the caller keeps its prior (good) values
+            // instead of flipping everything offline on a transient glitch.
+            return best;
+        }
+
+        private static async Task<(Dictionary<string, bool> regions, long? dataUnix)> FetchRegionsAsync(string url)
+        {
             var result = new Dictionary<string, bool>();
             long? dataUnix = null;
             try
             {
-                using var stream = await _http.GetStreamAsync(RegionsUrl);
+                using var stream = await _http.GetStreamAsync(url);
                 using var doc = await JsonDocument.ParseAsync(stream);
                 if (doc.RootElement.TryGetProperty("lastupdated2", out var lu)
                     && lu.ValueKind == JsonValueKind.Number && lu.TryGetInt64(out var luv))
@@ -62,7 +94,7 @@ namespace MakeYourChoice
             }
             catch
             {
-                // network/parse failure -> empty (callers keep prior state)
+                // network/parse failure -> empty
             }
             return (result, dataUnix);
         }
@@ -73,23 +105,25 @@ namespace MakeYourChoice
         /// </summary>
         public static async Task<(string text, int killerMinutes)> GetQueueAsync(string awsRegion)
         {
-            try
+            // Try each mirror; return the first that gives a real queue time.
+            foreach (var baseUrl in QueueUrls)
             {
-                var text = (await _http.GetStringAsync(QueueUrl + Uri.EscapeDataString(awsRegion))).Trim();
-                if (string.IsNullOrEmpty(text)
-                    || text.StartsWith("HTTP ", StringComparison.OrdinalIgnoreCase)
-                    || !text.Contains("Killer"))
+                try
                 {
-                    return (string.IsNullOrEmpty(text) ? "No data" : text, -1);
+                    var text = (await _http.GetStringAsync(baseUrl + Uri.EscapeDataString(awsRegion))).Trim();
+                    if (string.IsNullOrEmpty(text)
+                        || text.StartsWith("HTTP ", StringComparison.OrdinalIgnoreCase)
+                        || !text.Contains("Killer"))
+                    {
+                        continue; // no valid queue from this mirror -> try the next
+                    }
+                    var m = Regex.Match(text, @"Killer:\s*(\d+)m");
+                    int min = m.Success ? int.Parse(m.Groups[1].Value) : 0;
+                    return (text, min);
                 }
-                var m = Regex.Match(text, @"Killer:\s*(\d+)m");
-                int min = m.Success ? int.Parse(m.Groups[1].Value) : 0;
-                return (text, min);
+                catch { /* try next mirror */ }
             }
-            catch (Exception ex)
-            {
-                return ("Queue unavailable: " + ex.Message, -1);
-            }
+            return ("", -1); // no mirror had a queue (e.g. region down) -> caller shows nothing
         }
     }
 }
